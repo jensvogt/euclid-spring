@@ -1,8 +1,10 @@
 package de.jensvogt.euclid.spring.listener;
 
 import de.jensvogt.euclid.dto.ees.model.Event;
+import de.jensvogt.euclid.dto.ens.model.Subscription;
 import de.jensvogt.euclid.dto.eqs.model.Message;
 import de.jensvogt.euclid.module.ees.EuclidEes;
+import de.jensvogt.euclid.module.ens.EuclidEns;
 import de.jensvogt.euclid.module.eqs.EuclidEqs;
 import de.jensvogt.euclid.ws.EuclidEventListener;
 import de.jensvogt.euclid.ws.EuclidEventStream;
@@ -30,9 +32,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * dispatching what arrives to their handler and removing it afterward - deleting the message for a
  * queue listener, acknowledging the event for a bucket listener - unless that is turned off.
  *
- * <p>The two poll different things. A queue listener receives the messages of one EQS queue. A
- * bucket listener holds a durable EES subscription filtered to one bucket, so it accumulates only
- * the object events it asked for, keeps them across restarts and needs no queue to exist.
+ * <p>They poll different things. A queue listener receives the messages of one EQS queue. A topic
+ * listener receives from the queue it subscribes to an ENS topic, since fanning out to queues is
+ * the only delivery a topic has. A bucket listener holds a durable EES subscription filtered to one
+ * bucket, so it accumulates only the object events it asked for, keeps them across restarts and
+ * needs no queue to exist.
  *
  * <p>Starts one polling thread per registration when the Spring context is refreshed, and stops
  * them all on context close.
@@ -43,11 +47,13 @@ public class EuclidListenerContainer implements SmartLifecycle {
 
     private final EuclidEqs euclidSqs;
     private final EuclidEes euclidEes;
+    private final EuclidEns euclidEns;
     private final EuclidEventStream eventStream;
     private final List<EuclidEventListener> eventListeners = new ArrayList<>();
     private final JsonMapper jsonMapper;
     private final ObjectMapper payloadMapper;
     private final List<QueueRegistration> queueRegistrations = new ArrayList<>();
+    private final List<TopicRegistration> topicRegistrations = new ArrayList<>();
     private final List<BucketRegistration> bucketRegistrations = new ArrayList<>();
     private final AtomicBoolean running = new AtomicBoolean(false);
     private ExecutorService executor;
@@ -57,9 +63,9 @@ public class EuclidListenerContainer implements SmartLifecycle {
      * behaviour before there was a connection to be told over, kept for a caller that has no
      * event stream to give it.
      */
-    public EuclidListenerContainer(EuclidEqs euclidEqs, EuclidEes euclidEes,
+    public EuclidListenerContainer(EuclidEqs euclidEqs, EuclidEes euclidEes, EuclidEns euclidEns,
                                    ObjectProvider<JsonMapper> objectMapperProvider) {
-        this(euclidEqs, euclidEes, null, objectMapperProvider);
+        this(euclidEqs, euclidEes, euclidEns, null, objectMapperProvider);
     }
 
     /**
@@ -67,11 +73,12 @@ public class EuclidListenerContainer implements SmartLifecycle {
      *                            poll. A stream that cannot connect is not an error either: the
      *                            listener falls back to polling, which is what it did before.
      */
-    public EuclidListenerContainer(EuclidEqs euclidEqs, EuclidEes euclidEes,
+    public EuclidListenerContainer(EuclidEqs euclidEqs, EuclidEes euclidEes, EuclidEns euclidEns,
                                    ObjectProvider<EuclidEventStream> eventStreamProvider,
                                    ObjectProvider<JsonMapper> objectMapperProvider) {
         this.euclidSqs = euclidEqs;
         this.euclidEes = euclidEes;
+        this.euclidEns = euclidEns;
         this.eventStream = eventStreamProvider == null ? null : eventStreamProvider.getIfAvailable();
         this.jsonMapper = objectMapperProvider.getIfAvailable(JsonMapper::new);
         // An event payload carries every field ESM publishes, so a handler taking a type of its
@@ -83,6 +90,17 @@ public class EuclidListenerContainer implements SmartLifecycle {
                           boolean autoDelete) {
         method.setAccessible(true);
         queueRegistrations.add(new QueueRegistration(bean, method, queueName, maxMessages, waitTime, autoDelete));
+    }
+
+    /**
+     * Registers a handler for the messages published to {@code topicName}, delivered through
+     * {@code queueName} - the queue this listener subscribes to the topic.
+     */
+    public void registerTopic(Object bean, Method method, String topicName, String queueName, long maxMessages,
+                              long waitTime, boolean autoDelete) {
+        method.setAccessible(true);
+        topicRegistrations.add(new TopicRegistration(bean, method, topicName, queueName, maxMessages, waitTime,
+                autoDelete));
     }
 
     /**
@@ -99,7 +117,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
 
     @Override
     public void start() {
-        int listeners = queueRegistrations.size() + bucketRegistrations.size();
+        int listeners = queueRegistrations.size() + topicRegistrations.size() + bucketRegistrations.size();
         if (listeners == 0 || !running.compareAndSet(false, true)) {
             return;
         }
@@ -110,6 +128,9 @@ public class EuclidListenerContainer implements SmartLifecycle {
         });
         for (QueueRegistration registration : queueRegistrations) {
             executor.submit(() -> pollQueue(registration));
+        }
+        for (TopicRegistration registration : topicRegistrations) {
+            executor.submit(() -> pollTopic(registration));
         }
         for (BucketRegistration registration : bucketRegistrations) {
             if (startListening(registration)) {
@@ -151,10 +172,63 @@ public class EuclidListenerContainer implements SmartLifecycle {
         try {
             ern = euclidSqs.getQueueErn(registration.queueName()).ern();
         } catch (Exception e) {
-            logger.error("Could not resolve queue '" + registration.queueName() + "', listener not started", e);
+            logger.error("Could not resolve " + registration.describe() + ", listener not started", e);
             return;
         }
+        pollMessages(registration, ern);
+    }
 
+    private void pollTopic(TopicRegistration registration) {
+        String ern;
+        try {
+            ern = subscribedQueueErn(registration);
+        } catch (Exception e) {
+            logger.error("Could not subscribe to " + registration.describe() + ", listener not started", e);
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            return;
+        }
+        pollMessages(registration, ern);
+    }
+
+    /**
+     * Resolves the queue a topic listener receives from, creating the queue and the subscription
+     * delivering into it if they don't exist yet. A topic fans out to its subscribed queues and
+     * has no other delivery, so this is what "listening to a topic" is.
+     */
+    private String subscribedQueueErn(TopicRegistration registration) throws Exception {
+        String topicErn = euclidEns.getTopicErn(registration.topicName()).ern();
+        String queueErn = queueErn(registration.queueName());
+
+        List<Subscription> subscriptions = euclidEns.listSubscriptions(topicErn).subscriptions();
+        boolean subscribed = subscriptions != null && subscriptions.stream()
+                .anyMatch(subscription -> queueErn.equals(subscription.targetErn()));
+        if (!subscribed) {
+            euclidEns.subscribe(topicErn, queueErn);
+            logger.info("Subscribed queue '" + registration.queueName() + "' to topic '"
+                    + registration.topicName() + "'");
+        }
+        return queueErn;
+    }
+
+    /**
+     * The ERN of {@code queueName}, creating the queue if the server has none by that name - a
+     * listener naming the queue its topic is delivered to should not also have to create it.
+     */
+    private String queueErn(String queueName) throws Exception {
+        try {
+            String ern = euclidSqs.getQueueErn(queueName).ern();
+            if (StringUtils.hasText(ern)) {
+                return ern;
+            }
+        } catch (RuntimeException e) {
+            logger.debug("Queue '" + queueName + "' could not be resolved, creating it", e);
+        }
+        return euclidSqs.createQueue(queueName).ern();
+    }
+
+    private void pollMessages(MessageRegistration registration, String ern) {
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 List<Message> messages = euclidSqs
@@ -166,7 +240,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (Exception e) {
-                logger.error("Error polling queue '" + registration.queueName() + "'", e);
+                logger.error("Error polling " + registration.describe(), e);
             }
         }
     }
@@ -237,7 +311,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
         }
     }
 
-    private void dispatch(QueueRegistration registration, Message message) {
+    private void dispatch(MessageRegistration registration, Message message) {
         try {
             Method method = registration.method();
             Class<?> paramType = method.getParameterTypes()[0];
@@ -254,7 +328,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
                 euclidSqs.deleteMessage(message.receiptHandle());
             }
         } catch (Exception e) {
-            logger.error("Listener for queue '" + registration.queueName() + "' failed to handle message "
+            logger.error("Listener for " + registration.describe() + " failed to handle message "
                     + message.ern(), e);
         }
     }
@@ -306,8 +380,46 @@ public class EuclidListenerContainer implements SmartLifecycle {
         }
     }
 
+    /**
+     * What the two message-driven listeners have in common: both receive from a queue and differ
+     * only in how that queue is arrived at - named outright, or subscribed to a topic.
+     */
+    private sealed interface MessageRegistration permits QueueRegistration, TopicRegistration {
+
+        Object bean();
+
+        Method method();
+
+        long maxMessages();
+
+        long waitTime();
+
+        boolean autoDelete();
+
+        /**
+         * How this listener is named in a log line, from the caller's point of view rather than
+         * the queue's - a topic listener that says "queue" leaves the reader looking for a queue
+         * nobody wrote down.
+         */
+        String describe();
+    }
+
     private record QueueRegistration(Object bean, Method method, String queueName, long maxMessages, long waitTime,
-                                     boolean autoDelete) {
+                                     boolean autoDelete) implements MessageRegistration {
+
+        @Override
+        public String describe() {
+            return "queue '" + queueName + "'";
+        }
+    }
+
+    private record TopicRegistration(Object bean, Method method, String topicName, String queueName, long maxMessages,
+                                     long waitTime, boolean autoDelete) implements MessageRegistration {
+
+        @Override
+        public String describe() {
+            return "topic '" + topicName + "' (queue '" + queueName + "')";
+        }
     }
 
     private record BucketRegistration(Object bean, Method method, String subscriber, String bucketName, String prefix,

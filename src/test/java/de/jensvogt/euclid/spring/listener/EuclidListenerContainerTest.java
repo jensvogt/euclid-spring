@@ -2,11 +2,16 @@ package de.jensvogt.euclid.spring.listener;
 
 import de.jensvogt.euclid.dto.ees.ReceiveEventsResponse;
 import de.jensvogt.euclid.dto.ees.model.Event;
+import de.jensvogt.euclid.dto.ens.GetTopicErnResponse;
+import de.jensvogt.euclid.dto.ens.ListSubscriptionsResponse;
+import de.jensvogt.euclid.dto.ens.model.Subscription;
+import de.jensvogt.euclid.dto.eqs.CreateQueueResponse;
 import de.jensvogt.euclid.dto.eqs.GetQueueErnResponse;
 import de.jensvogt.euclid.dto.eqs.ReceiveMessagesResponse;
 import de.jensvogt.euclid.dto.eqs.model.Message;
 import de.jensvogt.euclid.exception.EuclidServiceException;
 import de.jensvogt.euclid.module.ees.EuclidEes;
+import de.jensvogt.euclid.module.ens.EuclidEns;
 import de.jensvogt.euclid.module.eqs.EuclidEqs;
 import de.jensvogt.euclid.ws.EuclidEventStream;
 import org.junit.jupiter.api.AfterEach;
@@ -46,6 +51,7 @@ class EuclidListenerContainerTest {
 
     private EuclidEqs euclidEqs;
     private EuclidEes euclidEes;
+    private EuclidEns euclidEns;
     private EuclidListenerContainer container;
 
     @BeforeEach
@@ -55,11 +61,17 @@ class EuclidListenerContainerTest {
 
         euclidEes = mock(EuclidEes.class);
 
+        euclidEns = mock(EuclidEns.class);
+        when(euclidEns.getTopicErn(anyString())).thenReturn(GetTopicErnResponse.builder().ern("topic-ern").build());
+        when(euclidEns.listSubscriptions(anyString())).thenReturn(ListSubscriptionsResponse.builder()
+                .subscriptions(List.of(new Subscription("sub-ern", "topic-ern", "SQS", "test-ern", "now", "now")))
+                .total(1).build());
+
         @SuppressWarnings("unchecked")
         ObjectProvider<JsonMapper> objectMapperProvider = mock(ObjectProvider.class);
         when(objectMapperProvider.getIfAvailable(any())).thenReturn(new JsonMapper());
 
-        container = new EuclidListenerContainer(euclidEqs, euclidEes, objectMapperProvider);
+        container = new EuclidListenerContainer(euclidEqs, euclidEes, euclidEns, objectMapperProvider);
     }
 
     @AfterEach
@@ -246,6 +258,74 @@ class EuclidListenerContainerTest {
         verify(euclidEes, timeout(2000).atLeastOnce()).receiveEvents(anyString(), anyLong(), anyLong(), anyLong());
     }
 
+    @Test
+    void topicListenerReceivesFromTheQueueAlreadySubscribedToTheTopic() throws Exception {
+        stubReceive(message("published-body"));
+        StringHandler handler = new StringHandler();
+        container.registerTopic(handler, StringHandler.class.getMethod("handle", String.class),
+                "order-events", "orders-app", 10, 0, true);
+
+        container.start();
+
+        await().atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertEquals("published-body", handler.received));
+        verify(euclidEns, timeout(1000)).getTopicErn("order-events");
+        verify(euclidEqs, timeout(1000)).getQueueErn("orders-app");
+        verify(euclidEns, never()).subscribe(anyString(), anyString());
+        verify(euclidEqs, never()).createQueue(anyString());
+        verify(euclidEqs, timeout(1000)).deleteMessage("receipt-1");
+    }
+
+    @Test
+    void topicListenerCreatesTheDeliveryQueueAndSubscribesIt() throws Exception {
+        when(euclidEqs.getQueueErn("orders-app"))
+                .thenThrow(new EuclidServiceException("eqs", "get-queue-ern", 404, "not found"));
+        when(euclidEqs.createQueue("orders-app"))
+                .thenReturn(CreateQueueResponse.builder().name("orders-app").ern("orders-app-ern").build());
+        when(euclidEns.listSubscriptions("topic-ern"))
+                .thenReturn(ListSubscriptionsResponse.builder().subscriptions(Collections.emptyList()).total(0).build());
+        stubReceive(message("published-body"));
+        StringHandler handler = new StringHandler();
+        container.registerTopic(handler, StringHandler.class.getMethod("handle", String.class),
+                "order-events", "orders-app", 10, 0, true);
+
+        container.start();
+
+        verify(euclidEqs, timeout(1000)).createQueue("orders-app");
+        verify(euclidEns, timeout(1000)).subscribe("topic-ern", "orders-app-ern");
+        verify(euclidEqs, timeout(1000).atLeastOnce()).receiveMessages("orders-app-ern", 10, 0);
+    }
+
+    @Test
+    void topicListenerIsNotStartedWhenTheTopicCannotBeResolved() throws Exception {
+        when(euclidEns.getTopicErn("missing"))
+                .thenThrow(new EuclidServiceException("ens", "get-topic-ern", 404, "not found"));
+        stubReceive(message("published-body"));
+        StringHandler handler = new StringHandler();
+        container.registerTopic(handler, StringHandler.class.getMethod("handle", String.class),
+                "missing", "orders-app", 10, 0, true);
+
+        container.start();
+
+        await().pollDelay(Duration.ofMillis(300)).atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertNull(handler.received));
+        verify(euclidEqs, never()).receiveMessages(anyString(), anyLong(), anyLong());
+    }
+
+    @Test
+    void topicListenerPassesTheFullEnvelopeAndKeepsTheMessageWhenAutoDeleteIsOff() throws Exception {
+        Message theMessage = message("published-body");
+        stubReceive(theMessage);
+        MessageHandler handler = new MessageHandler();
+        container.registerTopic(handler, MessageHandler.class.getMethod("handle", Message.class),
+                "order-events", "orders-app", 10, 0, false);
+
+        container.start();
+
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals(theMessage, handler.received));
+        verify(euclidEqs, never()).deleteMessage(anyString());
+    }
+
     private EuclidEventStream withEventStream() {
         EuclidEventStream stream = mock(EuclidEventStream.class);
         @SuppressWarnings("unchecked")
@@ -254,7 +334,7 @@ class EuclidListenerContainerTest {
         @SuppressWarnings("unchecked")
         ObjectProvider<JsonMapper> objectMapperProvider = mock(ObjectProvider.class);
         when(objectMapperProvider.getIfAvailable(any())).thenReturn(new JsonMapper());
-        container = new EuclidListenerContainer(euclidEqs, euclidEes, streamProvider, objectMapperProvider);
+        container = new EuclidListenerContainer(euclidEqs, euclidEes, euclidEns, streamProvider, objectMapperProvider);
         return stream;
     }
 

@@ -2,9 +2,9 @@
 
 Spring Boot auto-configuration for [euclid-jdk](https://github.com/jensvogt/euclid-jdk), the Java
 client library for the [Euclid](https://github.com/jensvogt/euclid) access and SQS APIs. Adds an
-auto-configured `EuclidEqs` and `EuclidEsm` beans, a `@QueueListener` annotation for declaring
-message handlers and a `@BucketListener` annotation for declaring handlers of a bucket's object
-events.
+auto-configured `EuclidEqs`, `EuclidEsm`, `EuclidEes` and `EuclidEns` beans, and annotations for
+declaring handlers: `@QueueListener` for the messages of a queue, `@TopicListener` for the messages
+published to a topic, and `@BucketListener` for a bucket's object events.
 
 Requires Java 25 and Spring Boot 4.
 
@@ -29,7 +29,7 @@ euclid.ca-cert-path=
 ```
 
 This logs in once (see `EuclidEam#login()` in euclid-jdk) and exposes that session's `EuclidEqs`,
-`EuclidEsm` and `EuclidEes` clients as beans, injectable like any other Spring bean.
+`EuclidEsm`, `EuclidEes` and `EuclidEns` clients as beans, injectable like any other Spring bean.
 
 ## `@QueueListener`
 
@@ -61,6 +61,39 @@ event for this queue, so a message is normally handled as it arrives rather than
 tick, and the client falls back to plain polling by itself if the gateway has no websocket support.
 Keep it above zero — a `waitTime` of zero makes `receiveMessages` return immediately, turning the
 listener's loop into a busy one.
+
+## `@TopicListener`
+
+```java
+@Component
+public class OrderBroadcasts {
+
+    @TopicListener("order-events")
+    public void onMessage(String body) {
+        // handle the published message
+    }
+}
+```
+
+A topic is not read directly — it fans out to the queues subscribed to it, and that is the only
+delivery ENS has. So at startup the container resolves the topic's ERN via `EuclidEns#getTopicErn`,
+creates the delivery queue if it does not exist yet, subscribes it to the topic unless a
+subscription to that queue is already registered, and from then on receives from that queue exactly
+as `@QueueListener` does — websocket wake-up included. Handler methods take the same parameters as a
+queue listener: a `String`, a `Message`, or a type of their own.
+
+The queue is what decides fan-out, so it defaults to one per handler,
+`<spring.application.name>-<topic>-<method>`. Two instances of one application therefore share a
+queue and split the messages between them, while two handlers — or two applications — each subscribe
+their own queue and so each receive every message, which is the point of publishing to a topic.
+Name it explicitly to share one deliberately, or to receive from a queue somebody else subscribed:
+
+```java
+@TopicListener(value = "order-events", queue = "order-audit", maxMessages = 5, waitTime = 10, autoDelete = false)
+public void onMessage(Message message) {
+    ...
+}
+```
 
 ## `@BucketListener`
 
