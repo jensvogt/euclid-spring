@@ -9,6 +9,7 @@ import de.jensvogt.euclid.module.esm.EuclidEsm;
 import de.jensvogt.euclid.spring.listener.BucketListenerBeanPostProcessor;
 import de.jensvogt.euclid.spring.listener.EuclidListenerContainer;
 import de.jensvogt.euclid.spring.listener.QueueListenerBeanPostProcessor;
+import de.jensvogt.euclid.ws.EuclidEventStream;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -62,11 +63,26 @@ public class EuclidSqsAutoConfiguration {
         return euclidSession.ees();
     }
 
+    /**
+     * The connection a {@code @BucketListener} is told over. Opened lazily by the first listener
+     * that starts, and never opened at all in an application that has none - and if it cannot be
+     * opened, the listeners fall back to asking, so this is an optimization rather than a
+     * requirement.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public EuclidEventStream euclidEventStream(EuclidSession euclidSession, EuclidProperties properties) {
+        return new EuclidEventStream(properties.getBaseUrl(), euclidSession.token(), euclidSession.region(),
+                euclidSession.accountId(), euclidSession.userId(), euclidSession.accessKeyId(),
+                euclidSession.secretAccessKey(), properties.getCaCertPath(), "ees");
+    }
+
     @Bean
     @ConditionalOnMissingBean
     public EuclidListenerContainer euclidListenerContainer(EuclidEqs euclidSqs, EuclidEes euclidEes,
+                                                             ObjectProvider<EuclidEventStream> eventStreamProvider,
                                                              ObjectProvider<JsonMapper> objectMapperProvider) {
-        return new EuclidListenerContainer(euclidSqs, euclidEes, objectMapperProvider);
+        return new EuclidListenerContainer(euclidSqs, euclidEes, eventStreamProvider, objectMapperProvider);
     }
 
     @Bean

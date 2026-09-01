@@ -4,6 +4,8 @@ import de.jensvogt.euclid.dto.ees.model.Event;
 import de.jensvogt.euclid.dto.eqs.model.Message;
 import de.jensvogt.euclid.module.ees.EuclidEes;
 import de.jensvogt.euclid.module.eqs.EuclidEqs;
+import de.jensvogt.euclid.ws.EuclidEventListener;
+import de.jensvogt.euclid.ws.EuclidEventStream;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -41,6 +43,8 @@ public class EuclidListenerContainer implements SmartLifecycle {
 
     private final EuclidEqs euclidSqs;
     private final EuclidEes euclidEes;
+    private final EuclidEventStream eventStream;
+    private final List<EuclidEventListener> eventListeners = new ArrayList<>();
     private final JsonMapper jsonMapper;
     private final ObjectMapper payloadMapper;
     private final List<QueueRegistration> queueRegistrations = new ArrayList<>();
@@ -48,10 +52,27 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private final AtomicBoolean running = new AtomicBoolean(false);
     private ExecutorService executor;
 
+    /**
+     * Builds a container that always asks for events rather than being told about them - the
+     * behaviour before there was a connection to be told over, kept for a caller that has no
+     * event stream to give it.
+     */
     public EuclidListenerContainer(EuclidEqs euclidEqs, EuclidEes euclidEes,
+                                   ObjectProvider<JsonMapper> objectMapperProvider) {
+        this(euclidEqs, euclidEes, null, objectMapperProvider);
+    }
+
+    /**
+     * @param eventStreamProvider the connection bucket listeners are told over, or {@code null} to
+     *                            poll. A stream that cannot connect is not an error either: the
+     *                            listener falls back to polling, which is what it did before.
+     */
+    public EuclidListenerContainer(EuclidEqs euclidEqs, EuclidEes euclidEes,
+                                   ObjectProvider<EuclidEventStream> eventStreamProvider,
                                    ObjectProvider<JsonMapper> objectMapperProvider) {
         this.euclidSqs = euclidEqs;
         this.euclidEes = euclidEes;
+        this.eventStream = eventStreamProvider == null ? null : eventStreamProvider.getIfAvailable();
         this.jsonMapper = objectMapperProvider.getIfAvailable(JsonMapper::new);
         // An event payload carries every field ESM publishes, so a handler taking a type of its
         // own names the few it cares about rather than all fifteen.
@@ -91,6 +112,9 @@ public class EuclidListenerContainer implements SmartLifecycle {
             executor.submit(() -> pollQueue(registration));
         }
         for (BucketRegistration registration : bucketRegistrations) {
+            if (startListening(registration)) {
+                continue;
+            }
             executor.submit(() -> pollEvents(registration));
         }
     }
@@ -99,6 +123,13 @@ public class EuclidListenerContainer implements SmartLifecycle {
     public void stop() {
         if (!running.compareAndSet(true, false)) {
             return;
+        }
+        for (EuclidEventListener listener : eventListeners) {
+            listener.close();
+        }
+        eventListeners.clear();
+        if (eventStream != null) {
+            eventStream.close();
         }
         if (executor != null) {
             executor.shutdownNow();
@@ -137,6 +168,48 @@ public class EuclidListenerContainer implements SmartLifecycle {
             } catch (Exception e) {
                 logger.error("Error polling queue '" + registration.queueName() + "'", e);
             }
+        }
+    }
+
+    /**
+     * Starts a listener that is told when its bucket changes, rather than one that asks.
+     *
+     * <p>Two cases still ask. Without an event stream there is nothing to be told over. And a
+     * registration with {@code autoAck = false} means the handler acknowledges events itself,
+     * which the pushed listener cannot honour - it acknowledges what the handler returns from -
+     * so honouring the annotation matters more than the connection.
+     *
+     * @return whether the listener was started; {@code false} means the caller should poll.
+     */
+    private boolean startListening(BucketRegistration registration) {
+        if (eventStream == null || !registration.autoAck()) {
+            return false;
+        }
+        try {
+            EuclidEventListener listener = EuclidEventListener.builder()
+                    .ees(euclidEes)
+                    .stream(eventStream)
+                    .name(registration.subscriber())
+                    .eventTypes(registration.eventTypes())
+                    .filter(registration.filter())
+                    // Acknowledged by the listener when the handler returns, so dispatch() must
+                    // not swallow the failure the way the polling path does - throwing is what
+                    // leaves the event to be delivered again.
+                    .handler(event -> dispatchOrThrow(registration, event))
+                    .build();
+            listener.start();
+            eventListeners.add(listener);
+            return true;
+        } catch (Exception e) {
+            // Every reason to end up here - websockets disabled on the gateway, a proxy in the
+            // way, an older server - is a reason to go back to asking rather than to fail the
+            // application's startup.
+            logger.warn("Could not listen for '" + registration.bucketName()
+                    + "' over the event stream, falling back to polling", e);
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            return false;
         }
     }
 
@@ -205,6 +278,31 @@ public class EuclidListenerContainer implements SmartLifecycle {
         } catch (Exception e) {
             logger.error("Listener for bucket '" + registration.bucketName() + "' failed to handle event "
                     + event.eventId(), e);
+        }
+    }
+
+    /**
+     * Hands one event to a handler, letting a failure out so the listener leaves the event
+     * unacknowledged - the polling path logs and moves on instead, because there it has already
+     * been claimed and acknowledging is a separate step.
+     */
+    private void dispatchOrThrow(BucketRegistration registration, Event event) {
+        try {
+            Method method = registration.method();
+            Class<?> paramType = method.getParameterTypes()[0];
+            Object arg;
+            if (paramType.isAssignableFrom(Event.class)) {
+                arg = event;
+            } else if (paramType.isAssignableFrom(Map.class)) {
+                arg = event.payload();
+            } else {
+                arg = payloadMapper.convertValue(event.payload(), paramType);
+            }
+            method.invoke(registration.bean(), arg);
+        } catch (Exception e) {
+            logger.error("Listener for bucket '" + registration.bucketName() + "' failed to handle event "
+                    + event.eventId(), e);
+            throw new IllegalStateException("bucket listener failed to handle event " + event.eventId(), e);
         }
     }
 

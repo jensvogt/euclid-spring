@@ -13,11 +13,19 @@ import java.lang.annotation.Target;
  *
  * <p>Events arrive over the Euclid event bus (EES): at startup the container registers a durable
  * subscription for {@link #subscriber()} on {@link #eventTypes()}, filtered to the bucket - and to
- * {@link #prefix()} and {@link #directories()} if those narrow it further - then claims events with
- * {@code EuclidEes#receiveEvents} and acknowledges them once the handler returns. Because the
- * filter is applied when an event is published, the subscriber only ever accumulates the events it
- * asked for, and because events are stored per subscriber, nothing is lost while the application is
- * down and no queue has to exist.
+ * {@link #prefix()} and {@link #directories()} if those narrow it further - claims the events it
+ * matched, and acknowledges them once the handler returns. Because the filter is applied when an
+ * event is published, the subscriber only ever accumulates the events it asked for, and because
+ * events are stored per subscriber, nothing is lost while the application is down and no queue has
+ * to exist.
+ *
+ * <p>The claim is triggered by the gateway saying that something is waiting, over the websocket
+ * connection the auto-configuration opens, so a handler runs as the object changes rather than on
+ * the next poll. Where that connection cannot be made - websockets disabled, a proxy in the way, an
+ * older server - the container asks on a long poll instead, which is the same delivery a little
+ * later. Two things keep polling either way: {@code autoAck = false}, because a listener that
+ * acknowledges events itself cannot be driven by one that acknowledges them for it, and an
+ * application with no event stream bean.
  *
  * <p>Supported method signatures: {@code (Event event)} (the full envelope, including event type,
  * event id, delivery attempts and the raw payload map), {@code (Map<String, Object> payload)}, or

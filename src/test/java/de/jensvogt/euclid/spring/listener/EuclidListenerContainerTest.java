@@ -8,12 +8,14 @@ import de.jensvogt.euclid.dto.eqs.model.Message;
 import de.jensvogt.euclid.exception.EuclidServiceException;
 import de.jensvogt.euclid.module.ees.EuclidEes;
 import de.jensvogt.euclid.module.eqs.EuclidEqs;
+import de.jensvogt.euclid.ws.EuclidEventStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -29,6 +31,8 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -197,6 +201,61 @@ class EuclidListenerContainerTest {
         await().pollDelay(Duration.ofMillis(300)).atMost(Duration.ofSeconds(2))
                 .untilAsserted(() -> assertNull(handler.received));
         verify(euclidEes, never()).receiveEvents(anyString(), anyLong(), anyLong(), anyLong());
+    }
+
+    @Test
+    void aBucketListenerIsToldOverTheEventStreamWhenThereIsOne() throws Exception {
+        EuclidEventStream stream = withEventStream();
+        EventHandler handler = new EventHandler();
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false, true);
+
+        container.start();
+
+        // Attached to its own subscriber name: from here the gateway tells it when something is
+        // waiting, instead of the listener asking every few seconds.
+        verify(stream, timeout(2000)).attach("invoice-import");
+        verify(euclidEes, timeout(2000)).subscribeEvents(eq("invoice-import"), anyList(), anyMap(), any());
+    }
+
+    @Test
+    void aListenerThatAcknowledgesItselfKeepsPolling() throws Exception {
+        EuclidEventStream stream = withEventStream();
+        EventHandler handler = new EventHandler();
+        // autoAck = false means the handler acknowledges events itself, which the pushed listener
+        // cannot honour - it acknowledges whatever the handler returns from - so the annotation
+        // wins and this one keeps asking.
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false, false);
+
+        container.start();
+
+        verify(euclidEes, timeout(2000).atLeastOnce()).receiveEvents(anyString(), anyLong(), anyLong(), anyLong());
+        verify(stream, never()).attach(anyString());
+    }
+
+    @Test
+    void aStreamThatCannotConnectFallsBackToPolling() throws Exception {
+        EuclidEventStream stream = withEventStream();
+        doThrow(new IOException("websockets are disabled")).when(stream).attach(anyString());
+        EventHandler handler = new EventHandler();
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false, true);
+
+        container.start();
+
+        // A gateway without websockets is not a reason to fail an application's startup: the
+        // listener does what it did before there was a connection to be told over.
+        verify(euclidEes, timeout(2000).atLeastOnce()).receiveEvents(anyString(), anyLong(), anyLong(), anyLong());
+    }
+
+    private EuclidEventStream withEventStream() {
+        EuclidEventStream stream = mock(EuclidEventStream.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<EuclidEventStream> streamProvider = mock(ObjectProvider.class);
+        when(streamProvider.getIfAvailable()).thenReturn(stream);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<JsonMapper> objectMapperProvider = mock(ObjectProvider.class);
+        when(objectMapperProvider.getIfAvailable(any())).thenReturn(new JsonMapper());
+        container = new EuclidListenerContainer(euclidEqs, euclidEes, streamProvider, objectMapperProvider);
+        return stream;
     }
 
     private void registerBucket(Object bean, java.lang.reflect.Method method, String bucket, String prefix,

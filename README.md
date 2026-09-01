@@ -64,6 +64,10 @@ listener's loop into a busy one.
 
 ## `@BucketListener`
 
+Handlers are woken by the gateway over a websocket - one connection for the whole
+application - and fall back to long polling when that connection cannot be made, so
+no configuration is needed either way.
+
 ```java
 @Component
 public class InvoiceUploads {
