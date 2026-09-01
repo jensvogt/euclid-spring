@@ -40,8 +40,12 @@ jobs:
           gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
           gpg-passphrase: MAVEN_GPG_PASSPHRASE
 
+      # -Prelease activates the profile holding the source, javadoc, GPG signing and
+      # central-publishing plugins. Without it the default maven-deploy-plugin runs instead and
+      # fails, since publishing goes through Central's plugin rather than a distributionManagement
+      # repository.
       - name: Publish to Maven Central
-        run: mvn -B clean deploy -DskipTests
+        run: mvn -B -Prelease clean deploy -DskipTests
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
           CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
