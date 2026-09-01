@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.3...euclid-spring-boot-starter-v0.1.4) (2026-09-01)
+
+
+### Bug Fixes
+
+* github release pipeline with updated dependencies ([57f6ff2](https://github.com/jensvogt/euclid-spring/commit/57f6ff2f1efc2575318e2f416ea29374bdd03f55))
+
 ## [0.1.3](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.2...euclid-spring-boot-starter-v0.1.3) (2026-09-01)
 
 
