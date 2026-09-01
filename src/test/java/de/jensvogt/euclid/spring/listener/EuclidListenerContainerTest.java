@@ -71,7 +71,8 @@ class EuclidListenerContainerTest {
         ObjectProvider<JsonMapper> objectMapperProvider = mock(ObjectProvider.class);
         when(objectMapperProvider.getIfAvailable(any())).thenReturn(new JsonMapper());
 
-        container = new EuclidListenerContainer(euclidEqs, euclidEes, euclidEns, objectMapperProvider);
+        container = new EuclidListenerContainer(providerOf(euclidEqs), providerOf(euclidEes), providerOf(euclidEns),
+                objectMapperProvider);
     }
 
     @AfterEach
@@ -326,6 +327,45 @@ class EuclidListenerContainerTest {
         verify(euclidEqs, never()).deleteMessage(anyString());
     }
 
+    /**
+     * The container asks for its clients through providers now, so a test hands it mocks the same
+     * way the context does.
+     */
+    private static <T> ObjectProvider<T> providerOf(T instance) {
+        @SuppressWarnings("unchecked")
+        ObjectProvider<T> provider = mock(ObjectProvider.class);
+        when(provider.getObject()).thenReturn(instance);
+        when(provider.getIfAvailable()).thenReturn(instance);
+        return provider;
+    }
+
+    /**
+     * The regression this guards against: a pushed listener that is never pushed to.
+     *
+     * <p>Being connected and being attached look identical from the client, so a gateway that
+     * forgot the session - or a connection replaced without its subscriptions - turns into
+     * permanent silence with a growing backlog and nothing logged. A push is meant to be an
+     * optimisation over asking, so the listener still asks.
+     */
+    @Test
+    void aPushedListenerStillAsksWhenNothingIsEverPushedToIt() throws Exception {
+        withEventStream();
+        Event theEvent = event();
+        // Empty at startup, so the drain that start() does itself finds nothing: whatever
+        // delivers this event afterwards can only be the periodic claim.
+        when(euclidEes.receiveEvents(anyString(), anyLong(), anyLong(), anyLong()))
+                .thenReturn(ReceiveEventsResponse.builder().events(Collections.emptyList()).total(0).build())
+                .thenReturn(ReceiveEventsResponse.builder().events(List.of(theEvent)).total(1).build())
+                .thenReturn(ReceiveEventsResponse.builder().events(Collections.emptyList()).total(0).build());
+        EventHandler handler = new EventHandler();
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false, true);
+
+        container.start();
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertEquals(theEvent, handler.received));
+        verify(euclidEes, timeout(2000)).ackEvents("invoice-import", List.of("evt-1"));
+    }
+
     private EuclidEventStream withEventStream() {
         EuclidEventStream stream = mock(EuclidEventStream.class);
         @SuppressWarnings("unchecked")
@@ -334,7 +374,8 @@ class EuclidListenerContainerTest {
         @SuppressWarnings("unchecked")
         ObjectProvider<JsonMapper> objectMapperProvider = mock(ObjectProvider.class);
         when(objectMapperProvider.getIfAvailable(any())).thenReturn(new JsonMapper());
-        container = new EuclidListenerContainer(euclidEqs, euclidEes, euclidEns, streamProvider, objectMapperProvider);
+        container = new EuclidListenerContainer(providerOf(euclidEqs), providerOf(euclidEes), providerOf(euclidEns),
+                streamProvider, objectMapperProvider);
         return stream;
     }
 

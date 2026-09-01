@@ -2,6 +2,7 @@ package de.jensvogt.euclid.spring.listener;
 
 import de.jensvogt.euclid.spring.annotation.QueueListener;
 import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.context.EmbeddedValueResolverAware;
 import org.springframework.util.ReflectionUtils;
@@ -14,10 +15,16 @@ import org.springframework.util.StringValueResolver;
  */
 public class QueueListenerBeanPostProcessor implements BeanPostProcessor, EmbeddedValueResolverAware {
 
-    private final EuclidListenerContainer container;
+    private final ObjectProvider<EuclidListenerContainer> container;
     private StringValueResolver embeddedValueResolver;
 
-    public QueueListenerBeanPostProcessor(EuclidListenerContainer container) {
+    /**
+     * Takes the container as a provider rather than the container itself: a bean post processor is
+     * created before the ordinary singletons are, and asking for the container there would drag
+     * the whole client graph into that phase. It is only needed once an annotated method is
+     * actually found, which is after the context has finished starting up.
+     */
+    public QueueListenerBeanPostProcessor(ObjectProvider<EuclidListenerContainer> container) {
         this.container = container;
     }
 
@@ -33,7 +40,7 @@ public class QueueListenerBeanPostProcessor implements BeanPostProcessor, Embedd
             String queueName = embeddedValueResolver != null
                     ? embeddedValueResolver.resolveStringValue(annotation.value())
                     : annotation.value();
-            container.register(bean, method, queueName, annotation.maxMessages(), annotation.waitTime(),
+            container.getObject().register(bean, method, queueName, annotation.maxMessages(), annotation.waitTime(),
                     annotation.autoDelete());
         }, method -> method.getAnnotation(QueueListener.class) != null);
         return bean;

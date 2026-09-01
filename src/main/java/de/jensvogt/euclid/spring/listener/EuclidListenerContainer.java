@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -45,13 +46,20 @@ public class EuclidListenerContainer implements SmartLifecycle {
 
     private static final Log logger = LogFactory.getLog(EuclidListenerContainer.class);
 
-    private final EuclidEqs euclidSqs;
-    private final EuclidEes euclidEes;
-    private final EuclidEns euclidEns;
-    private final EuclidEventStream eventStream;
+    private final ObjectProvider<EuclidEqs> euclidSqsProvider;
+    private final ObjectProvider<EuclidEes> euclidEesProvider;
+    private final ObjectProvider<EuclidEns> euclidEnsProvider;
+    private final ObjectProvider<EuclidEventStream> eventStreamProvider;
+    private final ObjectProvider<JsonMapper> objectMapperProvider;
+
+    private EuclidEqs euclidSqs;
+    private EuclidEes euclidEes;
+    private EuclidEns euclidEns;
+    // Read by stop(), which a shutdown hook can call on a thread other than the one that started.
+    private volatile EuclidEventStream eventStream;
+    private JsonMapper jsonMapper;
+    private ObjectMapper payloadMapper;
     private final List<EuclidEventListener> eventListeners = new ArrayList<>();
-    private final JsonMapper jsonMapper;
-    private final ObjectMapper payloadMapper;
     private final List<QueueRegistration> queueRegistrations = new ArrayList<>();
     private final List<TopicRegistration> topicRegistrations = new ArrayList<>();
     private final List<BucketRegistration> bucketRegistrations = new ArrayList<>();
@@ -59,31 +67,43 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private ExecutorService executor;
 
     /**
+     * Drives the periodic claim that backs up the pushed listeners; created only if there is a
+     * pushed listener to back up.
+     */
+    private ScheduledExecutorService safetyNet;
+
+    /**
      * Builds a container that always asks for events rather than being told about them - the
      * behaviour before there was a connection to be told over, kept for a caller that has no
      * event stream to give it.
      */
-    public EuclidListenerContainer(EuclidEqs euclidEqs, EuclidEes euclidEes, EuclidEns euclidEns,
+    public EuclidListenerContainer(ObjectProvider<EuclidEqs> euclidSqsProvider,
+                                   ObjectProvider<EuclidEes> euclidEesProvider,
+                                   ObjectProvider<EuclidEns> euclidEnsProvider,
                                    ObjectProvider<JsonMapper> objectMapperProvider) {
-        this(euclidEqs, euclidEes, euclidEns, null, objectMapperProvider);
+        this(euclidSqsProvider, euclidEesProvider, euclidEnsProvider, null, objectMapperProvider);
     }
 
     /**
+     * Takes every client as a provider and resolves none of them here, so that constructing the
+     * container - which the bean post processors do while the context is still starting up - logs
+     * nobody in and opens nothing. {@link #start()} resolves what the registered listeners
+     * actually need, once the context is refreshed.
+     *
      * @param eventStreamProvider the connection bucket listeners are told over, or {@code null} to
      *                            poll. A stream that cannot connect is not an error either: the
      *                            listener falls back to polling, which is what it did before.
      */
-    public EuclidListenerContainer(EuclidEqs euclidEqs, EuclidEes euclidEes, EuclidEns euclidEns,
+    public EuclidListenerContainer(ObjectProvider<EuclidEqs> euclidSqsProvider,
+                                   ObjectProvider<EuclidEes> euclidEesProvider,
+                                   ObjectProvider<EuclidEns> euclidEnsProvider,
                                    ObjectProvider<EuclidEventStream> eventStreamProvider,
                                    ObjectProvider<JsonMapper> objectMapperProvider) {
-        this.euclidSqs = euclidEqs;
-        this.euclidEes = euclidEes;
-        this.euclidEns = euclidEns;
-        this.eventStream = eventStreamProvider == null ? null : eventStreamProvider.getIfAvailable();
-        this.jsonMapper = objectMapperProvider.getIfAvailable(JsonMapper::new);
-        // An event payload carries every field ESM publishes, so a handler taking a type of its
-        // own names the few it cares about rather than all fifteen.
-        this.payloadMapper = jsonMapper.rebuild().disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).build();
+        this.euclidSqsProvider = euclidSqsProvider;
+        this.euclidEesProvider = euclidEesProvider;
+        this.euclidEnsProvider = euclidEnsProvider;
+        this.eventStreamProvider = eventStreamProvider;
+        this.objectMapperProvider = objectMapperProvider;
     }
 
     public void register(Object bean, Method method, String queueName, long maxMessages, long waitTime,
@@ -121,6 +141,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
         if (listeners == 0 || !running.compareAndSet(false, true)) {
             return;
         }
+        resolveClients();
         executor = Executors.newFixedThreadPool(listeners, runnable -> {
             Thread thread = new Thread(runnable, "euclid-listener");
             thread.setDaemon(false);
@@ -133,17 +154,56 @@ public class EuclidListenerContainer implements SmartLifecycle {
             executor.submit(() -> pollTopic(registration));
         }
         for (BucketRegistration registration : bucketRegistrations) {
-            if (startListening(registration)) {
+            EuclidEventListener listener = startListening(registration);
+            if (listener != null) {
+                scheduleSafetyNet(registration, listener);
                 continue;
             }
             executor.submit(() -> pollEvents(registration));
         }
     }
 
+    /**
+     * Asks a pushed listener to look for itself every so often, on top of being told.
+     * <p>
+     * A push is meant to be an optimisation - the events are in the store either way, and the
+     * server's own comment for it says a push that fails costs latency because "the subscriber
+     * finds the event on its next receive-events". A listener driven only by pushes has no next
+     * receive-events, so anything that stops them reaching it - a connection replaced without its
+     * subscriptions, a gateway that forgot the session, a dropped frame - turns into silence that
+     * lasts until the application is restarted, with a growing backlog and nothing logged. This is
+     * what makes that a delay of at most one interval instead.
+     * <p>
+     * It costs one claim per interval per listener when there is nothing waiting, and it cannot
+     * double-process: the drain it triggers is the listener's own, on the listener's own thread,
+     * and the claim in receive-events is what decides who handles an event.
+     */
+    private void scheduleSafetyNet(BucketRegistration registration, EuclidEventListener listener) {
+        if (safetyNet == null) {
+            safetyNet = Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "euclid-listener-safety-net");
+                thread.setDaemon(true);
+                return thread;
+            });
+        }
+        long interval = Math.max(registration.waitTime(), 1);
+        safetyNet.scheduleWithFixedDelay(() -> {
+            try {
+                listener.onNotify(registration.bucketName());
+            } catch (RuntimeException e) {
+                logger.debug("Safety-net claim for bucket '" + registration.bucketName() + "' failed", e);
+            }
+        }, interval, interval, TimeUnit.SECONDS);
+    }
+
     @Override
     public void stop() {
         if (!running.compareAndSet(true, false)) {
             return;
+        }
+        if (safetyNet != null) {
+            safetyNet.shutdownNow();
+            safetyNet = null;
         }
         for (EuclidEventListener listener : eventListeners) {
             listener.close();
@@ -165,6 +225,29 @@ public class EuclidListenerContainer implements SmartLifecycle {
     @Override
     public boolean isRunning() {
         return running.get();
+    }
+
+    /**
+     * Resolves the clients the registered listeners need, and only those: an application whose
+     * listeners are all {@code @QueueListener} never asks for an ENS or EES client, so it never
+     * needs those beans to exist. Called from {@link #start()} after the early return, so a
+     * context that registered no listener at all resolves nothing.
+     */
+    private void resolveClients() {
+        if (!queueRegistrations.isEmpty() || !topicRegistrations.isEmpty()) {
+            euclidSqs = euclidSqsProvider.getObject();
+        }
+        if (!topicRegistrations.isEmpty()) {
+            euclidEns = euclidEnsProvider.getObject();
+        }
+        if (!bucketRegistrations.isEmpty()) {
+            euclidEes = euclidEesProvider.getObject();
+            eventStream = eventStreamProvider == null ? null : eventStreamProvider.getIfAvailable();
+        }
+        jsonMapper = objectMapperProvider.getIfAvailable(JsonMapper::new);
+        // An event payload carries every field ESM publishes, so a handler taking a type of its
+        // own names the few it cares about rather than all fifteen.
+        payloadMapper = jsonMapper.rebuild().disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).build();
     }
 
     private void pollQueue(QueueRegistration registration) {
@@ -253,11 +336,11 @@ public class EuclidListenerContainer implements SmartLifecycle {
      * which the pushed listener cannot honour - it acknowledges what the handler returns from -
      * so honouring the annotation matters more than the connection.
      *
-     * @return whether the listener was started; {@code false} means the caller should poll.
+     * @return the listener that was started, or {@code null} if the caller should poll instead.
      */
-    private boolean startListening(BucketRegistration registration) {
+    private EuclidEventListener startListening(BucketRegistration registration) {
         if (eventStream == null || !registration.autoAck()) {
-            return false;
+            return null;
         }
         try {
             EuclidEventListener listener = EuclidEventListener.builder()
@@ -273,7 +356,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
                     .build();
             listener.start();
             eventListeners.add(listener);
-            return true;
+            return listener;
         } catch (Exception e) {
             // Every reason to end up here - websockets disabled on the gateway, a proxy in the
             // way, an older server - is a reason to go back to asking rather than to fail the
@@ -283,7 +366,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            return false;
+            return null;
         }
     }
 

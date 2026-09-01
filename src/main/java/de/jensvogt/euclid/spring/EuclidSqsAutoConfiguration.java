@@ -87,25 +87,34 @@ public class EuclidSqsAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public EuclidListenerContainer euclidListenerContainer(EuclidEqs euclidSqs, EuclidEes euclidEes,
-                                                             EuclidEns euclidEns,
+    public EuclidListenerContainer euclidListenerContainer(ObjectProvider<EuclidEqs> euclidSqsProvider,
+                                                             ObjectProvider<EuclidEes> euclidEesProvider,
+                                                             ObjectProvider<EuclidEns> euclidEnsProvider,
                                                              ObjectProvider<EuclidEventStream> eventStreamProvider,
                                                              ObjectProvider<JsonMapper> objectMapperProvider) {
-        return new EuclidListenerContainer(euclidSqs, euclidEes, euclidEns, eventStreamProvider, objectMapperProvider);
+        return new EuclidListenerContainer(euclidSqsProvider, euclidEesProvider, euclidEnsProvider,
+                eventStreamProvider, objectMapperProvider);
     }
 
+    // A bean post processor is instantiated ahead of the ordinary singletons, so a @Bean method
+    // declaring one is static: an instance method would need this configuration class built that
+    // early too, before it can be post-processed itself. Each takes the container as a provider
+    // for the same reason - see the post processors' constructors.
     @Bean
-    public QueueListenerBeanPostProcessor queueListenerBeanPostProcessor(EuclidListenerContainer container) {
+    public static QueueListenerBeanPostProcessor queueListenerBeanPostProcessor(
+            ObjectProvider<EuclidListenerContainer> container) {
         return new QueueListenerBeanPostProcessor(container);
     }
 
     @Bean
-    public TopicListenerBeanPostProcessor topicListenerBeanPostProcessor(EuclidListenerContainer container) {
+    public static TopicListenerBeanPostProcessor topicListenerBeanPostProcessor(
+            ObjectProvider<EuclidListenerContainer> container) {
         return new TopicListenerBeanPostProcessor(container);
     }
 
     @Bean
-    public BucketListenerBeanPostProcessor bucketListenerBeanPostProcessor(EuclidListenerContainer container) {
+    public static BucketListenerBeanPostProcessor bucketListenerBeanPostProcessor(
+            ObjectProvider<EuclidListenerContainer> container) {
         return new BucketListenerBeanPostProcessor(container);
     }
 }

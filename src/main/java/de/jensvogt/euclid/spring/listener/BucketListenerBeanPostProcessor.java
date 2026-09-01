@@ -2,6 +2,7 @@ package de.jensvogt.euclid.spring.listener;
 
 import de.jensvogt.euclid.spring.annotation.BucketListener;
 import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.context.EmbeddedValueResolverAware;
 import org.springframework.util.ReflectionUtils;
@@ -19,10 +20,16 @@ import java.util.List;
  */
 public class BucketListenerBeanPostProcessor implements BeanPostProcessor, EmbeddedValueResolverAware {
 
-    private final EuclidListenerContainer container;
+    private final ObjectProvider<EuclidListenerContainer> container;
     private StringValueResolver embeddedValueResolver;
 
-    public BucketListenerBeanPostProcessor(EuclidListenerContainer container) {
+    /**
+     * Takes the container as a provider rather than the container itself: a bean post processor is
+     * created before the ordinary singletons are, and asking for the container there would drag
+     * the whole client graph into that phase. It is only needed once an annotated method is
+     * actually found, which is after the context has finished starting up.
+     */
+    public BucketListenerBeanPostProcessor(ObjectProvider<EuclidListenerContainer> container) {
         this.container = container;
     }
 
@@ -37,7 +44,7 @@ public class BucketListenerBeanPostProcessor implements BeanPostProcessor, Embed
             BucketListener annotation = method.getAnnotation(BucketListener.class);
             String bucket = resolve(annotation.value());
             List<String> eventTypes = Arrays.stream(annotation.eventTypes()).map(this::resolve).toList();
-            container.registerBucket(bean, method, subscriber(annotation, bucket, method), bucket,
+            container.getObject().registerBucket(bean, method, subscriber(annotation, bucket, method), bucket,
                     resolve(annotation.prefix()), annotation.directories(), eventTypes, annotation.maxEvents(),
                     annotation.waitTime(), annotation.visibilityTimeout(), annotation.autoAck());
         }, method -> method.getAnnotation(BucketListener.class) != null);
