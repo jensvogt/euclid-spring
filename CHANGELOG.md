@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.2...euclid-spring-boot-starter-v0.1.3) (2026-09-01)
+
+
+### Bug Fixes
+
+* add @BucketListener support ([551db80](https://github.com/jensvogt/euclid-spring/commit/551db8078025d4c9ba484638b49d187ab188d808))
+
 ## [0.1.2](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.1...euclid-spring-boot-starter-v0.1.2) (2026-09-01)
 
 
