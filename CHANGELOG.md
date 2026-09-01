@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.4...euclid-spring-boot-starter-v0.1.5) (2026-09-01)
+
+
+### Bug Fixes
+
+* use websockets for notifications and fall back ([fec7a63](https://github.com/jensvogt/euclid-spring/commit/fec7a639709a6f5411a508da1d3b0cd2d354cf22))
+
 ## [0.1.4](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.3...euclid-spring-boot-starter-v0.1.4) (2026-09-01)
 
 
