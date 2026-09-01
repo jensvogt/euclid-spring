@@ -1,0 +1,27 @@
+name: build
+
+# The release workflow deploys with -DskipTests, so this is the only thing that compiles the tests
+# and runs them: on every push and pull request, rather than once a release is already being cut.
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: maven
+
+      # Without -Prelease, so this stays a build and test rather than also signing artifacts with
+      # a GPG key that only the release job has.
+      - name: Build and test
+        run: mvn -B verify

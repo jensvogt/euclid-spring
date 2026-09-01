@@ -6,7 +6,7 @@ auto-configured `EuclidEqs` and `EuclidEsm` beans, a `@QueueListener` annotation
 message handlers and a `@BucketListener` annotation for declaring handlers of a bucket's object
 events.
 
-Requires Java 25 and Spring Boot 3.
+Requires Java 25 and Spring Boot 4.
 
 ## Installation
 
@@ -14,7 +14,7 @@ Requires Java 25 and Spring Boot 3.
 <dependency>
     <groupId>io.github.jensvogt</groupId>
     <artifactId>euclid-spring-boot-starter</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.3</version>
 </dependency>
 ```
 
