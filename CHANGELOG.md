@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.5...euclid-spring-boot-starter-v0.1.6) (2026-09-01)
+
+
+### Bug Fixes
+
+* topic listener registration and handling ([0f30442](https://github.com/jensvogt/euclid-spring/commit/0f3044289b1c431337e5f95021bdde01f57545a6))
+
 ## [0.1.5](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.4...euclid-spring-boot-starter-v0.1.5) (2026-09-01)
 
 
