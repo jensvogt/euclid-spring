@@ -74,6 +74,16 @@ public class EuclidProperties {
      * <p>Only needed when there is no login to learn it from - an application euclid deployed is
      * told which account it belongs to rather than discovering it.
      */
+    /**
+     * Unix socket path this application must listen on to be considered ready, bound from
+     * {@code EUCLID_SOCKET}.
+     *
+     * <p>Set by the euclid manager for an application it runs, and by nothing else - so its
+     * presence is also how the starter knows it is running inside euclid rather than from an IDE
+     * or a plain {@code java -jar}.
+     */
+    private String socket;
+
     private String accountId;
 
     /**
@@ -124,6 +134,14 @@ public class EuclidProperties {
 
     public void setNamespace(String namespace) {
         this.namespace = namespace;
+    }
+
+    public String getSocket() {
+        return socket;
+    }
+
+    public void setSocket(String socket) {
+        this.socket = socket;
     }
 
     public String getAccountId() {
