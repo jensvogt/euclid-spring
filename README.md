@@ -24,12 +24,57 @@ Requires Java 25 and Spring Boot 4.
 euclid.base-url=https://euclid.example.com
 euclid.username=jens
 euclid.password=secret
+# optional, the namespace to make active for the session; unscoped when unset
+euclid.namespace=development
 # optional, defaults to /etc/euclid/euclid_cert.crt if readable
 euclid.ca-cert-path=
 ```
 
 This logs in once (see `EuclidEam#login()` in euclid-jdk) and exposes that session's `EuclidEqs`,
 `EuclidEsm`, `EuclidEes` and `EuclidEns` clients as beans, injectable like any other Spring bean.
+
+`euclid.namespace` is applied at login, so every namespace-scoped call those clients make is
+restricted to it. It is worth setting as soon as more than one namespace exists: an unscoped
+session resolving a bucket or queue *by name* has nothing to tell two of the same name apart with.
+
+As with any Spring Boot property these bind from the environment, so `EUCLID_BASE_URL`,
+`EUCLID_USERNAME`, `EUCLID_PASSWORD` and `EUCLID_NAMESPACE` work without naming them in a file.
+Prefer that to writing `euclid.username=${EUCLID_USERNAME}` in your own YAML: configuration
+properties binding leaves an unresolvable placeholder as its literal text rather than failing, so a
+missing or misspelled variable is sent to the server as the string `${EUCLID_USERNAME}` and comes
+back as `401 Invalid credentials` instead of saying what was wrong.
+
+### Applications euclid deploys
+
+An application started by euclid itself (EAP) is configured entirely from the environment the
+manager gives it, and needs no properties file. It authenticates in one of two ways, neither of
+which involves a password:
+
+| The application runs as | euclid provides | How it authenticates |
+| --- | --- | --- |
+| a named user who may log in | `EUCLID_ACCESS_KEY_ID`, `EUCLID_SECRET_ACCESS_KEY` | signed requests (SigV4) |
+| a technical principal | `EUCLID_CREDENTIALS_FILE` | the bearer token in that file |
+
+A technical principal — the `app-<id>` identity euclid creates for the application — has no
+password and is given no access key, so the token file is the only thing it can present. The file
+is JSON, mode `0600`, and holds the token together with the identity it names:
+
+```json
+{"token":"…","expiresAt":"2026-09-02T12:00:00Z","userId":"app-file-copy",
+ "accountId":"000000000000","region":"eu-central-1","endpoint":"https://localhost:5566"}
+```
+
+The starter picks whichever is present, preferring the access key, and falls back to
+`euclid.username`/`euclid.password` only when there is neither. Set `euclid.credentials-file`
+yourself to point at such a file outside euclid; otherwise leave all of this alone.
+
+The token expires - an hour by default (`euclid.modules.eap.credentials-ttl-seconds` on the server),
+with euclid rewriting the file at half that - so the clients do not keep the one they started with.
+Each takes its token from the file per request (`TokenRefreshable` in euclid-jdk), and the file is
+re-read whenever its modification time changes, which is exactly when euclid renames a new one into
+place. A process that runs for weeks keeps working without restarting or rebuilding its beans. If
+the file becomes unreadable the last good token stays in use and a warning is logged, since a token
+with time left on it is better than an application that stops.
 
 ## `@QueueListener`
 

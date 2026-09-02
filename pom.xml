@@ -4,7 +4,7 @@
 
     <groupId>io.github.jensvogt</groupId>
     <artifactId>euclid-spring-boot-starter</artifactId>
-    <version>0.1.7-SNAPSHOT</version>
+    <version>0.1.7</version>
     <name>euclid-spring-boot-starter</name>
     <description>Spring Boot auto-configuration and @QueueListener support for euclid-jdk</description>
     <packaging>jar</packaging>
@@ -37,8 +37,8 @@
         <maven.compiler.source>25</maven.compiler.source>
         <maven.compiler.target>25</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <euclid-jdk.version>0.1.13</euclid-jdk.version>
-        <spring-boot.version>4.1.0</spring-boot.version>
+        <euclid-jdk.version>0.1.14</euclid-jdk.version>
+        <spring-boot.version>4.1.1</spring-boot.version>
         <junit.version>6.1.3</junit.version>
     </properties>
 
