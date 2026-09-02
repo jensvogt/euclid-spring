@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.7...euclid-spring-boot-starter-v0.1.8) (2026-09-02)
+
+
+### Bug Fixes
+
+* websocket ping for safety net ([ebbae8f](https://github.com/jensvogt/euclid-spring/commit/ebbae8fd4800f7946b35f1b10d4a9d0d4e1c04d6))
+
 ## [0.1.7](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.6...euclid-spring-boot-starter-v0.1.7) (2026-09-01)
 
 
