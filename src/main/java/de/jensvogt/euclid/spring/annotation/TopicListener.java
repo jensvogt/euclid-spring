@@ -64,4 +64,14 @@ public @interface TopicListener {
      * throwing.
      */
     boolean autoDelete() default true;
+
+    /**
+     * Number of threads polling the delivery queue concurrently, each independently claiming and
+     * dispatching messages. Raise this when publishing outruns what one thread can drain, or a
+     * handler is slow enough that throughput matters more than order - a message claimed by a
+     * concurrent thread is no longer guaranteed to be handled in the order it was published, since
+     * a slower thread can still be working on an older message while a faster one moves on to a
+     * newer one.
+     */
+    int concurrency() default 1;
 }

@@ -73,8 +73,7 @@ public class EuclidProperties {
      *
      * <p>Only needed when there is no login to learn it from - an application euclid deployed is
      * told which account it belongs to rather than discovering it.
-     */
-    /**
+     * <p>
      * Unix socket path this application must listen on to be considered ready, bound from
      * {@code EUCLID_SOCKET}.
      *

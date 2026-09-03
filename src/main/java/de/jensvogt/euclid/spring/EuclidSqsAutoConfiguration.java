@@ -59,8 +59,7 @@ public class EuclidSqsAutoConfiguration {
      * <p>Three ways to authenticate, tried in that order of directness - an access key, the
      * credentials file euclid writes, then a login. The first two need no round trip; only the
      * last one talks to the gateway.
-     */
-    /**
+     * <p>
      * The token file euclid writes for an application it deployed, read now and re-read as euclid
      * replaces it. Absent from applications that authenticate some other way.
      *
@@ -193,6 +192,23 @@ public class EuclidSqsAutoConfiguration {
         return client;
     }
 
+    /**
+     * Answers the euclid manager's readiness check, when euclid is what started this application.
+     *
+     * <p>Creating the socket named by {@code EUCLID_SOCKET} is the readiness signal: the manager
+     * waits for it and kills the process if it never appears, so an application that starts
+     * perfectly well but does not bind it is killed and restarted for as long as it lives. Only
+     * created when that variable is set - which euclid sets and nothing else does - so an
+     * application run from an IDE or a plain jar is unaffected. A caller that wants to serve real
+     * actions on that socket defines its own bean and this one steps aside.
+     */
+    @Bean(destroyMethod = "stop")
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "euclid", name = "socket")
+    public EuclidReadinessSocket euclidReadinessSocket(EuclidProperties properties) {
+        return new EuclidReadinessSocket(properties.getSocket());
+    }
+
     @Bean
     @ConditionalOnMissingBean
     public EuclidEqs euclidSqs(EuclidSession euclidSession, ObjectProvider<CredentialsFileTokens> credentialsFile) {
@@ -229,7 +245,7 @@ public class EuclidSqsAutoConfiguration {
                                                ObjectProvider<CredentialsFileTokens> credentialsFile) {
         return refreshing(new EuclidEventStream(properties.getBaseUrl(), euclidSession.token(), euclidSession.region(),
                 euclidSession.accountId(), euclidSession.userId(), euclidSession.accessKeyId(),
-                euclidSession.secretAccessKey(), properties.getCaCertPath(), "ees"), credentialsFile);
+                euclidSession.secretAccessKey(), euclidSession.caCertPath(), "ees"), credentialsFile);
     }
 
     @Bean

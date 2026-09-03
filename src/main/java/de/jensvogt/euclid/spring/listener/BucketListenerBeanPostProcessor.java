@@ -46,7 +46,8 @@ public class BucketListenerBeanPostProcessor implements BeanPostProcessor, Embed
             List<String> eventTypes = Arrays.stream(annotation.eventTypes()).map(this::resolve).toList();
             container.getObject().registerBucket(bean, method, subscriber(annotation, bucket, method), bucket,
                     resolve(annotation.prefix()), annotation.directories(), eventTypes, annotation.maxEvents(),
-                    annotation.waitTime(), annotation.visibilityTimeout(), annotation.autoAck());
+                    annotation.waitTime(), annotation.visibilityTimeout(), annotation.autoAck(),
+                    annotation.concurrency());
         }, method -> method.getAnnotation(BucketListener.class) != null);
         return bean;
     }

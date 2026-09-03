@@ -85,7 +85,7 @@ class EuclidListenerContainerTest {
         stubReceive(message("{\"name\":\"abc\",\"value\":5}"));
         TypedHandler handler = new TypedHandler();
         container.register(handler, TypedHandler.class.getMethod("handle", TestPayload.class),
-                "test-queue", 10, 0, true);
+                "test-queue", 10, 0, true, 1);
 
         container.start();
 
@@ -99,7 +99,7 @@ class EuclidListenerContainerTest {
         stubReceive(message("{\"name\":\"abc\",\"value\":5}"));
         StringHandler handler = new StringHandler();
         container.register(handler, StringHandler.class.getMethod("handle", String.class),
-                "test-queue", 10, 0, true);
+                "test-queue", 10, 0, true, 1);
 
         container.start();
 
@@ -113,7 +113,7 @@ class EuclidListenerContainerTest {
         stubReceive(theMessage);
         MessageHandler handler = new MessageHandler();
         container.register(handler, MessageHandler.class.getMethod("handle", Message.class),
-                "test-queue", 10, 0, true);
+                "test-queue", 10, 0, true, 1);
 
         container.start();
 
@@ -125,7 +125,7 @@ class EuclidListenerContainerTest {
         stubReceive(message("not-json"));
         TypedHandler handler = new TypedHandler();
         container.register(handler, TypedHandler.class.getMethod("handle", TestPayload.class),
-                "test-queue", 10, 0, true);
+                "test-queue", 10, 0, true, 1);
 
         container.start();
 
@@ -264,7 +264,7 @@ class EuclidListenerContainerTest {
         stubReceive(message("published-body"));
         StringHandler handler = new StringHandler();
         container.registerTopic(handler, StringHandler.class.getMethod("handle", String.class),
-                "order-events", "orders-app", 10, 0, true);
+                "order-events", "orders-app", 10, 0, true, 1);
 
         container.start();
 
@@ -288,7 +288,7 @@ class EuclidListenerContainerTest {
         stubReceive(message("published-body"));
         StringHandler handler = new StringHandler();
         container.registerTopic(handler, StringHandler.class.getMethod("handle", String.class),
-                "order-events", "orders-app", 10, 0, true);
+                "order-events", "orders-app", 10, 0, true, 1);
 
         container.start();
 
@@ -304,7 +304,7 @@ class EuclidListenerContainerTest {
         stubReceive(message("published-body"));
         StringHandler handler = new StringHandler();
         container.registerTopic(handler, StringHandler.class.getMethod("handle", String.class),
-                "missing", "orders-app", 10, 0, true);
+                "missing", "orders-app", 10, 0, true, 1);
 
         container.start();
 
@@ -319,7 +319,7 @@ class EuclidListenerContainerTest {
         stubReceive(theMessage);
         MessageHandler handler = new MessageHandler();
         container.registerTopic(handler, MessageHandler.class.getMethod("handle", Message.class),
-                "order-events", "orders-app", 10, 0, false);
+                "order-events", "orders-app", 10, 0, false, 1);
 
         container.start();
 
@@ -379,10 +379,31 @@ class EuclidListenerContainerTest {
         return stream;
     }
 
+    @Test
+    void aSubscribeThatFailsDoesNotStopTheListenerFromPolling() throws Exception {
+        // This is the failure that started it: an application comes up while euclid is still
+        // coming up, and its very first subscribe times out. That used to end the listener - it
+        // logged "listener not started" and returned, so the bucket was never watched again until
+        // the application was restarted. Now it polls anyway, and the subscribe is retried by the
+        // attempt to get back onto the event stream.
+        doThrow(new IOException("request timed out"))
+                .doReturn(null)
+                .when(euclidEes).subscribeEvents(anyString(), anyList(), anyMap());
+
+        Event theEvent = event();
+        stubReceiveEvents(theEvent);
+        EventHandler handler = new EventHandler();
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false, true);
+
+        container.start();
+
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals(theEvent, handler.received));
+    }
+
     private void registerBucket(Object bean, java.lang.reflect.Method method, String bucket, String prefix,
                                 boolean directories, boolean autoAck) {
         container.registerBucket(bean, method, "invoice-import", bucket, prefix, directories, OBJECT_EVENTS,
-                10, 0, 300, autoAck);
+                10, 0, 300, autoAck, 1);
     }
 
     private void stubReceive(Message message) throws Exception {

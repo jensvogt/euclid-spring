@@ -51,6 +51,19 @@ class EuclidReadinessSocketTest {
     }
 
     @Test
+    void theAutoConfigurationDeclaresIt() {
+        // The class shipping is not the same as the bean existing: 0.1.9 carried
+        // EuclidReadinessSocket and declared no @Bean for it, so every application it was supposed
+        // to keep alive was killed for being unready anyway. Nothing in a unit test notices that,
+        // which is why this looks for the method rather than for the class.
+        boolean declared = java.util.Arrays.stream(EuclidSqsAutoConfiguration.class.getDeclaredMethods())
+                .anyMatch(method -> method.getReturnType().equals(EuclidReadinessSocket.class)
+                        && method.isAnnotationPresent(org.springframework.context.annotation.Bean.class));
+
+        assertTrue(declared, "no @Bean method returns EuclidReadinessSocket, so no application will ever bind its socket");
+    }
+
+    @Test
     void aPathLeftByAKilledProcessIsRebound() throws Exception {
         Path path = Files.createTempDirectory("euclid-readiness").resolve("app.sock");
         Files.createFile(path);

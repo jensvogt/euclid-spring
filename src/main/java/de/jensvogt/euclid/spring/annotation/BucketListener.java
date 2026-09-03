@@ -94,4 +94,13 @@ public @interface BucketListener {
      * claim expires.
      */
     boolean autoAck() default true;
+
+    /**
+     * Number of threads claiming events concurrently, whether that means independently polling -
+     * when the event stream is unavailable, or {@code autoAck = false} - or independently draining
+     * claims pushed over the event stream. Raise this when publishing outruns what one thread can
+     * drain. Either way the connection itself stays a single one; only the claiming and dispatching
+     * behind it is parallelized.
+     */
+    int concurrency() default 1;
 }

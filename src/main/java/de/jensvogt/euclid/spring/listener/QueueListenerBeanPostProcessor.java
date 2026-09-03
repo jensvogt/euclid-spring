@@ -41,7 +41,7 @@ public class QueueListenerBeanPostProcessor implements BeanPostProcessor, Embedd
                     ? embeddedValueResolver.resolveStringValue(annotation.value())
                     : annotation.value();
             container.getObject().register(bean, method, queueName, annotation.maxMessages(), annotation.waitTime(),
-                    annotation.autoDelete());
+                    annotation.autoDelete(), annotation.concurrency());
         }, method -> method.getAnnotation(QueueListener.class) != null);
         return bean;
     }
