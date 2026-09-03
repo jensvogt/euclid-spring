@@ -6,6 +6,7 @@
       "package-name": "euclid-spring-boot-starter",
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true,
+      "skip-snapshot": true,
       "extra-files": [
         {
           "type": "pom",
