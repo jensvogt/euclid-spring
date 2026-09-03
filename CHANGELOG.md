@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.10](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.9...euclid-spring-boot-starter-v0.1.10) (2026-09-03)
+
+
+### Bug Fixes
+
+* concurrency, align with euclid-jdk. ([0676bbe](https://github.com/jensvogt/euclid-spring/commit/0676bbe13519bbba21779e855851d35f000cfd43))
+* remove snapshots ([4ac9e70](https://github.com/jensvogt/euclid-spring/commit/4ac9e70fc76b6d3c4274ffd2a5698627e6c600f5))
+
 ## [0.1.9](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.8...euclid-spring-boot-starter-v0.1.9) (2026-09-02)
 
 
