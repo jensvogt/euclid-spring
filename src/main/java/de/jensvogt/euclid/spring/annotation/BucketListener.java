@@ -11,21 +11,18 @@ import java.lang.annotation.Target;
  * {@code euclid-spring-boot-starter}'s {@code BucketListenerBeanPostProcessor} discovers annotated
  * methods and registers them with the {@code EuclidListenerContainer}.
  *
- * <p>Events arrive over the Euclid event bus (EES): at startup the container registers a durable
- * subscription for {@link #subscriber()} on {@link #eventTypes()}, filtered to the bucket - and to
- * {@link #prefix()} and {@link #directories()} if those narrow it further - claims the events it
- * matched, and acknowledges them once the handler returns. Because the filter is applied when an
- * event is published, the subscriber only ever accumulates the events it asked for, and because
- * events are stored per subscriber, nothing is lost while the application is down and no queue has
- * to exist.
+ * <p>At startup the container gives the listener a queue of its own, subscribes that queue to the
+ * bucket's object events - filtered by {@link #eventTypes()}, {@link #prefix()} and
+ * {@link #directories()} - and receives from it exactly as {@code @QueueListener} does, websocket
+ * wake-up included. The filters ride on the subscription and the server applies them as it
+ * publishes, so only matching events are ever put in the queue.
  *
- * <p>The claim is triggered by the gateway saying that something is waiting, over the websocket
- * connection the auto-configuration opens, so a handler runs as the object changes rather than on
- * the next poll. Where that connection cannot be made - websockets disabled, a proxy in the way, an
- * older server - the container asks on a long poll instead, which is the same delivery a little
- * later. Two things keep polling either way: {@code autoAck = false}, because a listener that
- * acknowledges events itself cannot be driven by one that acknowledges them for it, and an
- * application with no event stream bean.
+ * <p>The queue belongs to one run of the application: it is created at startup, and deleted along
+ * with its subscription when the context closes. A queue left behind by a run that was killed
+ * before it could do that is deleted by the next run's sweep, once its owner has stopped saying it
+ * is alive. Two consequences follow. Events published while no instance is running are not kept -
+ * there is no queue to keep them in - and every running instance has its own queue, so each
+ * receives every event rather than the instances sharing the work between them.
  *
  * <p>Supported method signatures: {@code (Event event)} (the full envelope, including event type,
  * event id, delivery attempts and the raw payload map), {@code (Map<String, Object> payload)}, or
@@ -61,46 +58,45 @@ public @interface BucketListener {
     String[] eventTypes() default {"esm.object.created", "esm.object.updated", "esm.object.deleted"};
 
     /**
-     * Durable subscriber name the events are stored and claimed under, defaulting to
-     * {@code <spring.application.name>-<bucket>-<method>}.
+     * Name the delivery queue is built from, defaulting to
+     * {@code <spring.application.name>-<bucket>-<method>}. A per-run id is appended to whatever
+     * this is, so naming it does not make two runs share a queue - it only decides what the queue
+     * is called and, with it, which queues a sweep recognises as this listener's.
+     */
+    String queue() default "";
+
+    /**
+     * Max number of events fetched per poll.
+     */
+    long maxMessages() default 10;
+
+    /**
+     * Long-poll wait time in seconds passed to {@code EuclidEqs#receiveMessages}, which spends it
+     * waiting for the delivery queue's {@code eqs.message.sent} websocket event.
      *
-     * <p>The name decides fan-out: instances sharing it share the work, since whichever claims an
-     * event first handles it, while two names each receive their own copy of every event. Set it
-     * explicitly to have separate handlers - or separate applications - deliberately share one
-     * subscription.
-     */
-    String subscriber() default "";
-
-    /**
-     * Max number of events claimed per poll.
-     */
-    long maxEvents() default 10;
-
-    /**
-     * Long-poll wait time in seconds passed to {@code EuclidEes#receiveEvents}. The server clamps
-     * this to 20.
+     * <p>Keep this above zero: {@code receiveMessages} does not wait at all for a
+     * {@code waitTime} of zero, which turns the listener's loop into a busy one.
      */
     long waitTime() default 20;
 
     /**
-     * Seconds a claim holds before an unacknowledged event becomes claimable again, so a handler
-     * that dies mid-work has its event redelivered rather than lost.
+     * Seconds the delivery queue makes a received event invisible for, so a handler that dies
+     * mid-work has its event delivered again rather than lost.
      */
     long visibilityTimeout() default 300;
 
     /**
-     * Whether the event is acknowledged - and so deleted - after the handler returns without
-     * throwing. A handler that throws leaves its event unacknowledged, to be redelivered once the
-     * claim expires.
+     * Whether the event is deleted from the delivery queue after the handler returns without
+     * throwing. A handler that throws leaves its event in the queue, to be delivered again once
+     * the visibility timeout expires.
      */
-    boolean autoAck() default true;
+    boolean autoDelete() default true;
 
     /**
-     * Number of threads claiming events concurrently, whether that means independently polling -
-     * when the event stream is unavailable, or {@code autoAck = false} - or independently draining
-     * claims pushed over the event stream. Raise this when publishing outruns what one thread can
-     * drain. Either way the connection itself stays a single one; only the claiming and dispatching
-     * behind it is parallelized.
+     * Number of threads receiving from the delivery queue concurrently, each independently
+     * claiming and dispatching events. Raise this when publishing outruns what one thread can
+     * drain, or a handler is slow enough that throughput matters more than the order events are
+     * handled in.
      */
     int concurrency() default 1;
 }

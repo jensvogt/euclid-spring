@@ -1,27 +1,31 @@
 package de.jensvogt.euclid.spring.listener;
 
-import de.jensvogt.euclid.dto.ees.ReceiveEventsResponse;
 import de.jensvogt.euclid.dto.ees.model.Event;
 import de.jensvogt.euclid.dto.ens.GetTopicErnResponse;
 import de.jensvogt.euclid.dto.ens.ListSubscriptionsResponse;
 import de.jensvogt.euclid.dto.ens.model.Subscription;
 import de.jensvogt.euclid.dto.eqs.CreateQueueResponse;
+import de.jensvogt.euclid.dto.eqs.ListQueueResponse;
+import de.jensvogt.euclid.dto.eqs.model.Queue;
+import de.jensvogt.euclid.dto.esm.GetBucketErnResponse;
+import de.jensvogt.euclid.dto.esm.SubscribeResponse;
 import de.jensvogt.euclid.dto.eqs.GetQueueErnResponse;
 import de.jensvogt.euclid.dto.eqs.ReceiveMessagesResponse;
 import de.jensvogt.euclid.dto.eqs.model.Message;
 import de.jensvogt.euclid.exception.EuclidServiceException;
-import de.jensvogt.euclid.module.ees.EuclidEes;
+import de.jensvogt.euclid.module.esm.EuclidEsm;
 import de.jensvogt.euclid.module.ens.EuclidEns;
 import de.jensvogt.euclid.module.eqs.EuclidEqs;
-import de.jensvogt.euclid.ws.EuclidEventStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.ObjectProvider;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -30,8 +34,11 @@ import java.util.Map;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -46,11 +53,16 @@ import static org.mockito.Mockito.when;
 
 class EuclidListenerContainerTest {
 
+    /** What a bucket subscription delivers: the notification body, as ESM serialises it. */
+    private static final String BUCKET_EVENT_BODY = """
+            {"eventType":"esm.object.created","bucketErn":"bucket-ern","key":"reports/q3.csv",\
+            "ern":"object-ern","size":4211,"contentType":"text/csv","md5Sum":"abc"}""";
+
     private static final List<String> OBJECT_EVENTS =
             List.of("esm.object.created", "esm.object.updated", "esm.object.deleted");
 
     private EuclidEqs euclidEqs;
-    private EuclidEes euclidEes;
+    private EuclidEsm euclidEsm;
     private EuclidEns euclidEns;
     private EuclidListenerContainer container;
 
@@ -59,7 +71,14 @@ class EuclidListenerContainerTest {
         euclidEqs = mock(EuclidEqs.class);
         when(euclidEqs.getQueueErn(anyString())).thenReturn(GetQueueErnResponse.builder().ern("test-ern").build());
 
-        euclidEes = mock(EuclidEes.class);
+        euclidEsm = mock(EuclidEsm.class);
+        when(euclidEsm.getBucketErn(anyString())).thenReturn(GetBucketErnResponse.builder().ern("bucket-ern").build());
+        when(euclidEsm.subscribe(anyString(), anyString(), anyString(), anyList(), anyString(), anyBoolean()))
+                .thenReturn(SubscribeResponse.builder().ern("subscription-ern").build());
+        when(euclidEqs.createQueue(anyString(), anyLong(), anyLong(), anyLong(), anyString()))
+                .thenReturn(CreateQueueResponse.builder().name("delivery").ern("delivery-ern").build());
+        when(euclidEqs.listQueues(anyString(), anyLong(), anyLong(), anyString()))
+                .thenReturn(ListQueueResponse.builder().queues(Collections.emptyList()).total(0).build());
 
         euclidEns = mock(EuclidEns.class);
         when(euclidEns.getTopicErn(anyString())).thenReturn(GetTopicErnResponse.builder().ern("topic-ern").build());
@@ -71,7 +90,7 @@ class EuclidListenerContainerTest {
         ObjectProvider<JsonMapper> objectMapperProvider = mock(ObjectProvider.class);
         when(objectMapperProvider.getIfAvailable(any())).thenReturn(new JsonMapper());
 
-        container = new EuclidListenerContainer(providerOf(euclidEqs), providerOf(euclidEes), providerOf(euclidEns),
+        container = new EuclidListenerContainer(providerOf(euclidEqs), providerOf(euclidEsm), providerOf(euclidEns),
                 objectMapperProvider);
     }
 
@@ -135,128 +154,121 @@ class EuclidListenerContainerTest {
     }
 
     @Test
-    void passesFullEnvelopeForEventParameterAndAcknowledgesIt() throws Exception {
-        Event theEvent = event();
-        stubReceiveEvents(theEvent);
+    void bucketListenerCreatesItsOwnQueueAndSubscribesItFiltered() throws Exception {
+        stubReceive(message(BUCKET_EVENT_BODY));
         EventHandler handler = new EventHandler();
-        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false, true);
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "reports/", false);
 
         container.start();
 
-        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals(theEvent, handler.received));
-        verify(euclidEes, timeout(1000)).ackEvent("invoice-import", "evt-1");
+        ArgumentCaptor<String> queueName = ArgumentCaptor.forClass(String.class);
+        verify(euclidEqs, timeout(1000)).createQueue(queueName.capture(), eq(300L), anyLong(), anyLong(), eq(""));
+        // The run id keeps this run's queue apart from one another run of the same listener owns.
+        assertTrue(queueName.getValue().startsWith("invoice-import-"), queueName.getValue());
+        verify(euclidEsm, timeout(1000)).subscribe("bucket-ern", "SQS", "delivery-ern", OBJECT_EVENTS, "reports/",
+                false);
+        verify(euclidEqs, timeout(1000).atLeastOnce()).receiveMessages("delivery-ern", 10, 0);
     }
 
     @Test
-    void convertsPayloadToTypedParameterIgnoringTheFieldsItDoesNotName() throws Exception {
-        stubReceiveEvents(event());
+    void mapsTheDeliveredMessageIntoAnEventEnvelope() throws Exception {
+        stubReceive(message(BUCKET_EVENT_BODY));
+        EventHandler handler = new EventHandler();
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false);
+
+        container.start();
+
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertNotNull(handler.received));
+        Event event = handler.received;
+        assertEquals("esm.object.created", event.eventType());
+        // The queue's own two: which delivery this is, and whether it is a redelivery.
+        assertEquals("123", event.eventId());
+        assertEquals(2, event.attempts());
+        assertEquals("reports/q3.csv", event.payload().get("key"));
+        verify(euclidEqs, timeout(1000)).deleteMessage("receipt-1");
+    }
+
+    @Test
+    void convertsTheNotificationToTypedParameter() throws Exception {
+        stubReceive(message(BUCKET_EVENT_BODY));
         ObjectHandler handler = new ObjectHandler();
-        registerBucket(handler, ObjectHandler.class.getMethod("handle", ObjectSummary.class), "invoices", "", false,
-                true);
+        registerBucket(handler, ObjectHandler.class.getMethod("handle", ObjectSummary.class), "invoices", "", false);
 
         container.start();
 
         await().atMost(Duration.ofSeconds(2)).untilAsserted(
-                () -> assertEquals(new ObjectSummary("invoices", "reports/q3.csv", 4211), handler.received));
+                () -> assertEquals(new ObjectSummary("reports/q3.csv", 4211), handler.received));
     }
 
     @Test
-    void subscribesToTheBucketFilteringPrefixAndDirectoryMarkers() throws Exception {
-        stubReceiveEvents(event());
+    void deletesTheQueueAndItsSubscriptionOnShutdown() throws Exception {
+        stubReceive(message(BUCKET_EVENT_BODY));
         EventHandler handler = new EventHandler();
-        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "reports/", false,
-                true);
-
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false);
         container.start();
+        verify(euclidEsm, timeout(1000)).subscribe(anyString(), anyString(), anyString(), anyList(), anyString(),
+                anyBoolean());
 
-        Map<String, Object> expected = new LinkedHashMap<>();
-        expected.put("bucketName", "invoices");
-        expected.put("prefix", "reports/");
-        expected.put("directory", false);
-        verify(euclidEes, timeout(1000)).subscribeEvents("invoice-import", OBJECT_EVENTS, expected);
-        verify(euclidEes, timeout(1000).atLeastOnce()).receiveEvents("invoice-import", 10, 0, 300);
+        container.stop();
+
+        // Both, and the subscription first: one outliving the other leaves the server delivering
+        // to a queue nothing reads, or a queue nobody will ever drain.
+        verify(euclidEsm, timeout(1000)).unsubscribe("subscription-ern");
+        verify(euclidEqs, timeout(1000)).deleteQueue("delivery-ern");
     }
 
     @Test
-    void keepsDirectoryMarkersOutOfTheFilterWhenTheyAreWanted() throws Exception {
-        stubReceiveEvents(event());
+    void sweepsOnlyTheQueuesWhoseOwnerStoppedSayingItWasAlive() throws Exception {
+        when(euclidEqs.listQueues(anyString(), anyLong(), anyLong(), anyString())).thenReturn(
+                ListQueueResponse.builder().queues(List.of(
+                        queue("invoice-import-dead", "crashed-ern", Instant.now().minusSeconds(3600)),
+                        queue("invoice-import-live", "live-ern", Instant.now()))).total(2).build());
+        stubReceive(message(BUCKET_EVENT_BODY));
         EventHandler handler = new EventHandler();
-        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", true, true);
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false);
 
         container.start();
 
-        verify(euclidEes, timeout(1000)).subscribeEvents("invoice-import", OBJECT_EVENTS,
-                Map.of("bucketName", "invoices"));
+        verify(euclidEqs, timeout(1000)).deleteQueue("crashed-ern");
+        // A live instance's queue looks exactly like a crashed one's but for the heartbeat, so
+        // sweeping it would take another listener's deliveries with it.
+        verify(euclidEqs, never()).deleteQueue("live-ern");
     }
 
+    /**
+     * Deleting the queue is only half of it: the subscription is what the server fans an event out
+     * to, so one left pointing at a deleted queue makes every upload into the bucket produce a
+     * "target queue not found" for ever, and there is one more of them after every restart.
+     */
     @Test
-    void failingHandlerLeavesTheEventUnacknowledged() throws Exception {
-        stubReceiveEvents(event());
-        FailingHandler handler = new FailingHandler();
-        registerBucket(handler, FailingHandler.class.getMethod("handle", Event.class), "invoices", "", false, true);
-
-        container.start();
-
-        verify(euclidEes, timeout(1000).atLeastOnce()).receiveEvents(anyString(), anyLong(), anyLong(), anyLong());
-        verify(euclidEes, never()).ackEvent(anyString(), anyString());
-    }
-
-    @Test
-    void bucketListenerIsNotStartedWhenSubscribingFails() throws Exception {
-        when(euclidEes.subscribeEvents(anyString(), anyList(), anyMap()))
-                .thenThrow(new EuclidServiceException("ees", "subscribe-events", 403, "denied"));
-        stubReceiveEvents(event());
+    void sweepsTheSubscriptionsOfQueuesThatAreGone() throws Exception {
+        String deadErn = queueErnOf("invoice-import-dead");
+        String liveErn = queueErnOf("invoice-import-live");
+        when(euclidEqs.listQueues(anyString(), anyLong(), anyLong(), anyString())).thenReturn(
+                ListQueueResponse.builder().queues(List.of(
+                        queue("invoice-import-dead", deadErn, Instant.now().minusSeconds(3600)),
+                        queue("invoice-import-live", liveErn, Instant.now()))).total(2).build());
+        when(euclidEsm.listSubscriptions("bucket-ern")).thenReturn(
+                de.jensvogt.euclid.dto.esm.ListSubscriptionsResponse.builder().subscriptions(List.of(
+                        // The queue this one delivered into was swept just now.
+                        esmSubscription("sub-dead", deadErn),
+                        // Already gone before this run started - the case that accumulates.
+                        esmSubscription("sub-vanished", queueErnOf("invoice-import-vanished")),
+                        // Another instance is still using this one.
+                        esmSubscription("sub-live", liveErn),
+                        // Somebody else's queue on the same bucket, and none of our business.
+                        esmSubscription("sub-foreign", queueErnOf("another-app-queue"))))
+                        .total(4).build());
+        stubReceive(message(BUCKET_EVENT_BODY));
         EventHandler handler = new EventHandler();
-        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false, true);
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false);
 
         container.start();
 
-        await().pollDelay(Duration.ofMillis(300)).atMost(Duration.ofSeconds(2))
-                .untilAsserted(() -> assertNull(handler.received));
-        verify(euclidEes, never()).receiveEvents(anyString(), anyLong(), anyLong(), anyLong());
-    }
-
-    @Test
-    void aBucketListenerIsToldOverTheEventStreamWhenThereIsOne() throws Exception {
-        EuclidEventStream stream = withEventStream();
-        EventHandler handler = new EventHandler();
-        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false, true);
-
-        container.start();
-
-        // Attached to its own subscriber name: from here the gateway tells it when something is
-        // waiting, instead of the listener asking every few seconds.
-        verify(stream, timeout(2000)).attach("invoice-import");
-        verify(euclidEes, timeout(2000)).subscribeEvents(eq("invoice-import"), anyList(), anyMap(), any());
-    }
-
-    @Test
-    void aListenerThatAcknowledgesItselfKeepsPolling() throws Exception {
-        EuclidEventStream stream = withEventStream();
-        EventHandler handler = new EventHandler();
-        // autoAck = false means the handler acknowledges events itself, which the pushed listener
-        // cannot honour - it acknowledges whatever the handler returns from - so the annotation
-        // wins and this one keeps asking.
-        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false, false);
-
-        container.start();
-
-        verify(euclidEes, timeout(2000).atLeastOnce()).receiveEvents(anyString(), anyLong(), anyLong(), anyLong());
-        verify(stream, never()).attach(anyString());
-    }
-
-    @Test
-    void aStreamThatCannotConnectFallsBackToPolling() throws Exception {
-        EuclidEventStream stream = withEventStream();
-        doThrow(new IOException("websockets are disabled")).when(stream).attach(anyString());
-        EventHandler handler = new EventHandler();
-        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false, true);
-
-        container.start();
-
-        // A gateway without websockets is not a reason to fail an application's startup: the
-        // listener does what it did before there was a connection to be told over.
-        verify(euclidEes, timeout(2000).atLeastOnce()).receiveEvents(anyString(), anyLong(), anyLong(), anyLong());
+        verify(euclidEsm, timeout(1000)).unsubscribe("sub-dead");
+        verify(euclidEsm, timeout(1000)).unsubscribe("sub-vanished");
+        verify(euclidEsm, never()).unsubscribe("sub-live");
+        verify(euclidEsm, never()).unsubscribe("sub-foreign");
     }
 
     @Test
@@ -339,71 +351,10 @@ class EuclidListenerContainerTest {
         return provider;
     }
 
-    /**
-     * The regression this guards against: a pushed listener that is never pushed to.
-     *
-     * <p>Being connected and being attached look identical from the client, so a gateway that
-     * forgot the session - or a connection replaced without its subscriptions - turns into
-     * permanent silence with a growing backlog and nothing logged. A push is meant to be an
-     * optimisation over asking, so the listener still asks.
-     */
-    @Test
-    void aPushedListenerStillAsksWhenNothingIsEverPushedToIt() throws Exception {
-        withEventStream();
-        Event theEvent = event();
-        // Empty at startup, so the drain that start() does itself finds nothing: whatever
-        // delivers this event afterwards can only be the periodic claim.
-        when(euclidEes.receiveEvents(anyString(), anyLong(), anyLong(), anyLong()))
-                .thenReturn(ReceiveEventsResponse.builder().events(Collections.emptyList()).total(0).build())
-                .thenReturn(ReceiveEventsResponse.builder().events(List.of(theEvent)).total(1).build())
-                .thenReturn(ReceiveEventsResponse.builder().events(Collections.emptyList()).total(0).build());
-        EventHandler handler = new EventHandler();
-        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false, true);
-
-        container.start();
-
-        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertEquals(theEvent, handler.received));
-        verify(euclidEes, timeout(2000)).ackEvents("invoice-import", List.of("evt-1"));
-    }
-
-    private EuclidEventStream withEventStream() {
-        EuclidEventStream stream = mock(EuclidEventStream.class);
-        @SuppressWarnings("unchecked")
-        ObjectProvider<EuclidEventStream> streamProvider = mock(ObjectProvider.class);
-        when(streamProvider.getIfAvailable()).thenReturn(stream);
-        @SuppressWarnings("unchecked")
-        ObjectProvider<JsonMapper> objectMapperProvider = mock(ObjectProvider.class);
-        when(objectMapperProvider.getIfAvailable(any())).thenReturn(new JsonMapper());
-        container = new EuclidListenerContainer(providerOf(euclidEqs), providerOf(euclidEes), providerOf(euclidEns),
-                streamProvider, objectMapperProvider);
-        return stream;
-    }
-
-    @Test
-    void aSubscribeThatFailsDoesNotStopTheListenerFromPolling() throws Exception {
-        // This is the failure that started it: an application comes up while euclid is still
-        // coming up, and its very first subscribe times out. That used to end the listener - it
-        // logged "listener not started" and returned, so the bucket was never watched again until
-        // the application was restarted. Now it polls anyway, and the subscribe is retried by the
-        // attempt to get back onto the event stream.
-        doThrow(new IOException("request timed out"))
-                .doReturn(null)
-                .when(euclidEes).subscribeEvents(anyString(), anyList(), anyMap());
-
-        Event theEvent = event();
-        stubReceiveEvents(theEvent);
-        EventHandler handler = new EventHandler();
-        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false, true);
-
-        container.start();
-
-        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals(theEvent, handler.received));
-    }
-
     private void registerBucket(Object bean, java.lang.reflect.Method method, String bucket, String prefix,
-                                boolean directories, boolean autoAck) {
+                                boolean directories) {
         container.registerBucket(bean, method, "invoice-import", bucket, prefix, directories, OBJECT_EVENTS,
-                10, 0, 300, autoAck, 1);
+                10, 0, 300, true, 1);
     }
 
     private void stubReceive(Message message) throws Exception {
@@ -412,45 +363,34 @@ class EuclidListenerContainerTest {
                 .thenReturn(ReceiveMessagesResponse.builder().messages(Collections.emptyList()).total(0).build());
     }
 
-    private void stubReceiveEvents(Event event) throws Exception {
-        when(euclidEes.receiveEvents(anyString(), anyLong(), anyLong(), anyLong()))
-                .thenReturn(ReceiveEventsResponse.builder().events(List.of(event)).total(1).build())
-                .thenReturn(ReceiveEventsResponse.builder().events(Collections.emptyList()).total(0).build());
-    }
-
     private Message message(String body) {
         return new Message("ern", "queue-ern", "123", "AVAILABLE", "HIGH", body, "md5-body", "receipt-1",
-                body.length(), "application/json", Map.of(), "md5-attributes", "now", "now", "now");
+                2, body.length(), "application/json", Map.of(), "md5-attributes", "now", "now", "now");
+    }
+
+    /** A queue ERN as the server forms it: the name is its last segment. */
+    private static String queueErnOf(String queueName) {
+        return "ern:eqs:eu-central-1:000000000000::queue:" + queueName;
+    }
+
+    /** A bucket subscription as list-subscriptions returns it. */
+    private static de.jensvogt.euclid.dto.esm.model.Subscription esmSubscription(String ern, String targetErn) {
+        return new de.jensvogt.euclid.dto.esm.model.Subscription(ern, "bucket-ern", "SQS", targetErn,
+                Instant.now().toString(), Instant.now().toString());
     }
 
     /**
-     * An {@code esm.object.created} the way ESM publishes it, flat and carrying every field, so a
-     * handler naming three of them exercises what a real payload does to the conversion.
+     * A queue as list-queues returns it, carrying the heartbeat tag a sweep judges it by.
      */
-    private Event event() {
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("ern", "ern:esm:eu-central-1:000000000000:development:object:invoices/reports/q3.csv");
-        payload.put("bucketErn", "ern:esm:eu-central-1:000000000000:development:bucket:invoices");
-        payload.put("bucketName", "invoices");
-        payload.put("key", "reports/q3.csv");
-        payload.put("prefix", "reports/");
-        payload.put("directory", false);
-        payload.put("size", 4211);
-        payload.put("contentType", "text/csv");
-        payload.put("md5Sum", "2aacead6864fa88adab90b825464f87c");
-        payload.put("owner", "admin");
-        payload.put("userId", "admin");
-        payload.put("accountId", "000000000000");
-        payload.put("region", "eu-central-1");
-        payload.put("namespace", "development");
-        payload.put("eventTime", "2026-09-01T14:57:20.842631687Z");
-        return new Event("evt-1", "esm.object.created", "esm", payload, 0, "2026-09-01T14:57:20Z");
+    private Queue queue(String name, String ern, Instant heartbeat) {
+        return new Queue(name, "owner", ern, Map.of("euclid.listener.heartbeat", heartbeat.toString()), 0, 0, 0, 0, 0,
+                30, 1024, 3, "", "MIDDLE", Instant.now().toString(), Instant.now().toString());
     }
 
     private record TestPayload(String name, int value) {
     }
 
-    private record ObjectSummary(String bucketName, String key, long size) {
+    private record ObjectSummary(String key, long size) {
     }
 
     private static class TypedHandler {

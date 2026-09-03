@@ -12,7 +12,6 @@ import de.jensvogt.euclid.spring.listener.BucketListenerBeanPostProcessor;
 import de.jensvogt.euclid.spring.listener.EuclidListenerContainer;
 import de.jensvogt.euclid.spring.listener.QueueListenerBeanPostProcessor;
 import de.jensvogt.euclid.spring.listener.TopicListenerBeanPostProcessor;
-import de.jensvogt.euclid.ws.EuclidEventStream;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -233,30 +232,14 @@ public class EuclidSqsAutoConfiguration {
         return refreshing(euclidSession.ens(), credentialsFile);
     }
 
-    /**
-     * The connection a {@code @BucketListener} is told over. Opened lazily by the first listener
-     * that starts, and never opened at all in an application that has none - and if it cannot be
-     * opened, the listeners fall back to asking, so this is an optimization rather than a
-     * requirement.
-     */
-    @Bean
-    @ConditionalOnMissingBean
-    public EuclidEventStream euclidEventStream(EuclidSession euclidSession, EuclidProperties properties,
-                                               ObjectProvider<CredentialsFileTokens> credentialsFile) {
-        return refreshing(new EuclidEventStream(properties.getBaseUrl(), euclidSession.token(), euclidSession.region(),
-                euclidSession.accountId(), euclidSession.userId(), euclidSession.accessKeyId(),
-                euclidSession.secretAccessKey(), euclidSession.caCertPath(), "ees"), credentialsFile);
-    }
-
     @Bean
     @ConditionalOnMissingBean
     public EuclidListenerContainer euclidListenerContainer(ObjectProvider<EuclidEqs> euclidSqsProvider,
-                                                             ObjectProvider<EuclidEes> euclidEesProvider,
+                                                             ObjectProvider<EuclidEsm> euclidEsmProvider,
                                                              ObjectProvider<EuclidEns> euclidEnsProvider,
-                                                             ObjectProvider<EuclidEventStream> eventStreamProvider,
                                                              ObjectProvider<JsonMapper> objectMapperProvider) {
-        return new EuclidListenerContainer(euclidSqsProvider, euclidEesProvider, euclidEnsProvider,
-                eventStreamProvider, objectMapperProvider);
+        return new EuclidListenerContainer(euclidSqsProvider, euclidEsmProvider, euclidEnsProvider,
+                objectMapperProvider);
     }
 
     // A bean post processor is instantiated ahead of the ordinary singletons, so a @Bean method

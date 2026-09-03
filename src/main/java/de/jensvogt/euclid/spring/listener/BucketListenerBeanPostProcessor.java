@@ -44,22 +44,22 @@ public class BucketListenerBeanPostProcessor implements BeanPostProcessor, Embed
             BucketListener annotation = method.getAnnotation(BucketListener.class);
             String bucket = resolve(annotation.value());
             List<String> eventTypes = Arrays.stream(annotation.eventTypes()).map(this::resolve).toList();
-            container.getObject().registerBucket(bean, method, subscriber(annotation, bucket, method), bucket,
-                    resolve(annotation.prefix()), annotation.directories(), eventTypes, annotation.maxEvents(),
-                    annotation.waitTime(), annotation.visibilityTimeout(), annotation.autoAck(),
+            container.getObject().registerBucket(bean, method, queue(annotation, bucket, method), bucket,
+                    resolve(annotation.prefix()), annotation.directories(), eventTypes, annotation.maxMessages(),
+                    annotation.waitTime(), annotation.visibilityTimeout(), annotation.autoDelete(),
                     annotation.concurrency());
         }, method -> method.getAnnotation(BucketListener.class) != null);
         return bean;
     }
 
     /**
-     * The subscriber name events are stored under, which decides fan-out: derived from the method
-     * unless named explicitly, so that two instances of one application share their subscription -
-     * they run the same method - while two handlers of the same bucket each get their own copy.
+     * The name this listener's delivery queue is built from: derived from the method unless named
+     * explicitly, so that the queues of two handlers of the same bucket are told apart - by name
+     * and by the sweep that cleans up after a crash.
      */
-    private String subscriber(BucketListener annotation, String bucket, Method method) {
-        if (StringUtils.hasText(annotation.subscriber())) {
-            return resolve(annotation.subscriber());
+    private String queue(BucketListener annotation, String bucket, Method method) {
+        if (StringUtils.hasText(annotation.queue())) {
+            return resolve(annotation.queue());
         }
         String applicationName = resolve("${spring.application.name:}");
         String name = bucket + "-" + method.getName();

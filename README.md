@@ -142,10 +142,6 @@ public void onMessage(Message message) {
 
 ## `@BucketListener`
 
-Handlers are woken by the gateway over a websocket - one connection for the whole
-application - and fall back to long polling when that connection cannot be made, so
-no configuration is needed either way.
-
 ```java
 @Component
 public class InvoiceUploads {
@@ -153,24 +149,22 @@ public class InvoiceUploads {
     @BucketListener("invoices")
     public void onObject(Event event) {
         // event.eventType() is esm.object.created / .updated / .deleted,
-        // event.payload() carries key, prefix, size, contentType, owner, ...
+        // event.payload() carries key, ern, size, contentType and md5Sum
     }
 }
 ```
 
-Events arrive over the Euclid event bus (EES): at startup the container registers a durable
-subscription on `esm.object.created`, `esm.object.updated` and `esm.object.deleted`, filtered to the
-bucket, then claims events with `EuclidEes#receiveEvents` and acknowledges them once the handler
-returns. Because the filter is applied when an event is published, the subscriber only accumulates
-the events it asked for; because events are stored per subscriber, nothing is lost while the
-application is down and no queue has to exist.
+At startup the container gives the listener a queue of its own, subscribes that queue to the
+bucket's object events — filtered by `eventTypes`, `prefix` and `directories` — and receives from it
+exactly as `@QueueListener` does, websocket wake-up included. The server applies the filters as it
+publishes, so only matching events are ever put in the queue.
 
-Handler methods may take an `Event` (the full envelope, including event type, id and delivery
-attempts), a `Map<String, Object>` (the payload), or a type of their own, which the payload is
-converted into naming only the fields it cares about:
+Handler methods may take an `Event` (the envelope: event type, the id of this delivery, how many
+times it has been delivered, and the notification as a payload map), a `Map<String, Object>`, or a
+type of their own, which the notification is converted into naming only the fields it cares about:
 
 ```java
-public record UploadedObject(String key, String prefix, long size, String owner) {
+public record UploadedObject(String key, long size, String contentType) {
 }
 
 @BucketListener(value = "invoices", prefix = "reports/", eventTypes = "esm.object.created")
@@ -179,29 +173,32 @@ public void onReport(UploadedObject object) {
 }
 ```
 
-`prefix` restricts the events to one "directory" — it matches the prefix the server derives from
-the key, so it names a directory rather than any key starting with those characters — and
-`directories = true` additionally delivers the zero-byte directory markers an FTP `MKD` leaves
-behind, which are filtered out by default.
+`prefix` restricts delivery to keys starting with it, and `directories = true` additionally
+delivers the zero-byte directory markers an FTP `MKD` leaves behind, which are filtered out by
+default.
 
-### Subscriber names and fan-out
+### The delivery queue
 
-The subscriber name events are stored and claimed under decides fan-out, and defaults to
-`<spring.application.name>-<bucket>-<method>`. Two instances of one application therefore share a
-subscription — they run the same method, and whichever claims an event first handles it — while two
-different handlers of the same bucket each receive their own copy. Set `subscriber` explicitly to
-have separate handlers, or separate applications, deliberately share one:
+The queue belongs to one run of the application: it is created at startup, named
+`<spring.application.name>-<bucket>-<method>-<run id>`, and deleted along with its subscription when
+the context closes. A queue left behind by a run that was killed before it could do that is deleted
+by the next run's sweep, once its owner has stopped refreshing the heartbeat tag it stamps on its
+own queue.
+
+Two things follow from the queue being per-run. Events published while no instance is running are
+not kept — there is no queue to keep them in. And every running instance has its own queue, so each
+receives every event rather than the instances sharing the work between them.
 
 ```java
-@BucketListener(value = "invoices", subscriber = "invoice-import",
-                maxEvents = 5, waitTime = 10, visibilityTimeout = 60, autoAck = false)
+@BucketListener(value = "invoices", queue = "invoice-import",
+                maxMessages = 5, waitTime = 10, visibilityTimeout = 60, concurrency = 4)
 public void onObject(Event event) {
     ...
 }
 ```
 
-A handler that throws leaves its event unacknowledged, so it is redelivered once the claim's
-`visibilityTimeout` runs out rather than being lost.
+A handler that throws leaves its event in the queue, to be delivered again once the
+`visibilityTimeout` expires.
 
 ## Threading
 
