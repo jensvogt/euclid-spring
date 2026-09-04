@@ -100,6 +100,12 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private final AtomicLong busyNanos = new AtomicLong();
 
     /**
+     * Whether the last attempt to report load failed, so the first failure of a run can be logged
+     * loudly and the ones after it quietly.
+     */
+    private final AtomicBoolean loadReportFailed = new AtomicBoolean(false);
+
+    /**
      * Every queue this process is polling, however its listener arrived at one - named outright,
      * subscribed to a topic, or created for a bucket's object events. Recorded where they are all
      * the same thing (a queue being polled) rather than per listener type, so a listener kind
@@ -418,13 +424,21 @@ public class EuclidListenerContainer implements SmartLifecycle {
         final String instanceId = System.getenv("EUCLID_INSTANCE_ID");
         final String applicationId = System.getenv("EUCLID_APPLICATION_ID");
         if (instanceId == null || instanceId.isBlank()) {
-            logger.debug("Not reporting utilisation: no EUCLID_INSTANCE_ID, so this process is not a euclid application instance");
+            // Said out loud, not at debug. This fires once, so it cannot become noise - and when
+            // load reporting is silently absent, this is the line that explains why. An
+            // application deployed through euclid always has this set; a process started by hand
+            // never does, and for that one it is genuinely just information.
+            logger.info("Not reporting load: EUCLID_INSTANCE_ID is not set, so this process was not started by euclid "
+                                + "as an application instance and there is no instance for a measurement to be about");
             return;
         }
 
         final EuclidEmo euclidEmo = euclidEmoProvider.getIfAvailable();
         if (euclidEmo == null) {
-            logger.debug("Not reporting utilisation: no EuclidEmo bean available");
+            // A warning rather than information: this process *is* a euclid application instance,
+            // so load reporting was meant to happen and something is wrong with the wiring.
+            logger.warn("Not reporting load for instance " + instanceId + ": no EuclidEmo bean is available, so the "
+                                + "autoscaler will see nothing from this instance");
             return;
         }
 
@@ -457,6 +471,9 @@ public class EuclidListenerContainer implements SmartLifecycle {
                 // averages the samples that share a label, so three instances reporting their own
                 // depth under one application label would report the mean rather than the total.
                 // The reader sums the series instead.
+                if (loadReportFailed.compareAndSet(true, false)) {
+                    logger.info("Load reporting for instance " + instanceId + " is working again");
+                }
                 euclidEmo.pushMetrics(applicationId == null ? "application" : applicationId,
                                       List.of(Metric.gauge("application-utilisation", "instance", instanceId,
                                                            Math.min(100.0, utilisation)),
@@ -466,13 +483,21 @@ public class EuclidListenerContainer implements SmartLifecycle {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (Exception e) {
-                // Never fatal, and never noisy: the listeners are the point of this process and a
-                // monitoring push that cannot get through must not stop them or fill the log.
-                logger.debug("Could not report utilisation", e);
+                // Never fatal: the listeners are the point of this process, and a monitoring push
+                // that cannot get through must not stop them. But the first failure is said out
+                // loud - a reporter that never succeeds looks exactly like one that was never
+                // started, and that is a difference worth one log line. Every failure after it
+                // drops to debug, so a broken endpoint cannot fill the log.
+                if (loadReportFailed.compareAndSet(false, true)) {
+                    logger.warn("Could not report load for instance " + instanceId
+                                        + "; the autoscaler will not see this instance until it succeeds", e);
+                } else {
+                    logger.debug("Could not report load", e);
+                }
             }
         }, UTILISATION_PERIOD_SECONDS, UTILISATION_PERIOD_SECONDS, TimeUnit.SECONDS);
 
-        logger.info("Reporting utilisation for instance "+instanceId+" every "+UTILISATION_PERIOD_SECONDS+"s, capacity "+capacity+" concurrent handlers");
+        logger.info("Reporting load for instance "+instanceId+" every "+UTILISATION_PERIOD_SECONDS+"s, capacity "+capacity+" concurrent handlers");
     }
 
         /**
