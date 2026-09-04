@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.11](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.10...euclid-spring-boot-starter-v0.1.11) (2026-09-03)
+
+
+### Bug Fixes
+
+* remove websockets ([04c59ed](https://github.com/jensvogt/euclid-spring/commit/04c59ed0b5f6b5e40ba2ee2c20a29359e41b3817))
+
 ## [0.1.10](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.9...euclid-spring-boot-starter-v0.1.10) (2026-09-03)
 
 
