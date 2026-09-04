@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.12](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.11...euclid-spring-boot-starter-v0.1.12) (2026-09-04)
+
+
+### Bug Fixes
+
+* auto scaler: add utilisation reporting ([cdd2cbd](https://github.com/jensvogt/euclid-spring/commit/cdd2cbd2f67474cbd5b1723e5b29ba5d92f28910))
+
 ## [0.1.11](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.10...euclid-spring-boot-starter-v0.1.11) (2026-09-03)
 
 
