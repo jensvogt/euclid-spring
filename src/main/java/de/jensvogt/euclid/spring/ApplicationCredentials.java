@@ -1,6 +1,7 @@
 package de.jensvogt.euclid.spring;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
@@ -33,11 +34,15 @@ import java.time.format.DateTimeParseException;
  * @param userId     the principal the token names
  * @param accountId  account the application belongs to
  * @param region     region the application belongs to
+ * @param nameSpace  namespace the application's own requests run in, which is what lets it name a
+ *                   queue, topic or bucket instead of spelling out a full ERN; written by the
+ *                   manager from the application's definition, empty for one deployed before
+ *                   applications carried a namespace
  * @param endpoint   gateway the token is good for
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record ApplicationCredentials(String token, String expiresAt, String userId, String accountId,
-                                     String region, String endpoint) {
+                                     String region, @JsonProperty("namespace") String nameSpace, String endpoint) {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 

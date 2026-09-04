@@ -5,6 +5,7 @@ import de.jensvogt.euclid.auth.TokenRefreshable;
 import de.jensvogt.euclid.module.eam.EuclidEam;
 import de.jensvogt.euclid.module.eam.EuclidSession;
 import de.jensvogt.euclid.module.ees.EuclidEes;
+import de.jensvogt.euclid.module.emo.EuclidEmo;
 import de.jensvogt.euclid.module.ens.EuclidEns;
 import de.jensvogt.euclid.module.eqs.EuclidEqs;
 import de.jensvogt.euclid.module.esm.EuclidEsm;
@@ -162,7 +163,14 @@ public class EuclidSqsAutoConfiguration {
                                  or(credentials.accountId(), properties.getAccountId()),
                                  or(credentials.region(), properties.getRegion()), null, null,
                                  false, null, or(properties.getBaseUrl(), credentials.endpoint()),
-                                 properties.getCaCertPath(), properties.getNamespace());
+                                 properties.getCaCertPath(),
+                                 // An explicitly configured namespace wins, as it does for every
+                                 // other field here; without one the application inherits the
+                                 // namespace it was deployed into. That inheritance is what lets
+                                 // it name a queue or topic rather than spell out a full ERN, and
+                                 // it is why an application needs no scope configuration of its
+                                 // own at all.
+                                 or(properties.getNamespace(), credentials.nameSpace()));
     }
 
     /**
@@ -234,12 +242,18 @@ public class EuclidSqsAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
+    public EuclidEmo euclidEmo(EuclidSession euclidSession, ObjectProvider<CredentialsFileTokens> credentialsFile) {
+        return refreshing(euclidSession.emo(), credentialsFile);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
     public EuclidListenerContainer euclidListenerContainer(ObjectProvider<EuclidEqs> euclidSqsProvider,
                                                              ObjectProvider<EuclidEsm> euclidEsmProvider,
                                                              ObjectProvider<EuclidEns> euclidEnsProvider,
+                                                           ObjectProvider<EuclidEmo> euclidEmoProvider,
                                                              ObjectProvider<JsonMapper> objectMapperProvider) {
-        return new EuclidListenerContainer(euclidSqsProvider, euclidEsmProvider, euclidEnsProvider,
-                objectMapperProvider);
+        return new EuclidListenerContainer(euclidSqsProvider, euclidEsmProvider, euclidEnsProvider, euclidEmoProvider, objectMapperProvider);
     }
 
     // A bean post processor is instantiated ahead of the ordinary singletons, so a @Bean method

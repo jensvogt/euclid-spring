@@ -6,6 +6,8 @@ import de.jensvogt.euclid.dto.eqs.model.Message;
 import de.jensvogt.euclid.exception.EuclidServiceException;
 import de.jensvogt.euclid.dto.com.Variant;
 import de.jensvogt.euclid.dto.eqs.model.Queue;
+import de.jensvogt.euclid.dto.emo.Metric;
+import de.jensvogt.euclid.module.emo.EuclidEmo;
 import de.jensvogt.euclid.module.ens.EuclidEns;
 import de.jensvogt.euclid.module.eqs.EuclidEqs;
 import de.jensvogt.euclid.module.esm.EuclidEsm;
@@ -36,6 +38,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Polls Euclid on behalf of {@code @QueueListener}-, {@code @TopicListener}- and
@@ -85,6 +88,23 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private final ObjectProvider<EuclidEns> euclidEnsProvider;
     private final ObjectProvider<JsonMapper> objectMapperProvider;
 
+    private final ObjectProvider<EuclidEmo> euclidEmoProvider;
+
+    /**
+     * Nanoseconds this process has spent inside listener handlers since the last report.
+     *
+     * <p>Summed across every listener thread, so it exceeds wall-clock time whenever more than one
+     * handler runs at once - which is the point: it is measured against the concurrency the
+     * listeners were sized for, not against the clock.
+     */
+    private final AtomicLong busyNanos = new AtomicLong();
+
+    /**
+     * When the current measurement window began, so utilisation is a fraction of elapsed capacity
+     * rather than of an assumed interval.
+     */
+    private final AtomicLong windowStartNanos = new AtomicLong(System.nanoTime());
+
     private EuclidEqs euclidSqs;
     private EuclidEsm euclidEsm;
     private EuclidEns euclidEns;
@@ -126,10 +146,12 @@ public class EuclidListenerContainer implements SmartLifecycle {
     public EuclidListenerContainer(ObjectProvider<EuclidEqs> euclidSqsProvider,
                                    ObjectProvider<EuclidEsm> euclidEsmProvider,
                                    ObjectProvider<EuclidEns> euclidEnsProvider,
+                                   ObjectProvider<EuclidEmo> euclidEmoProvider,
                                    ObjectProvider<JsonMapper> objectMapperProvider) {
         this.euclidSqsProvider = euclidSqsProvider;
         this.euclidEsmProvider = euclidEsmProvider;
         this.euclidEnsProvider = euclidEnsProvider;
+        this.euclidEmoProvider = euclidEmoProvider;
         this.objectMapperProvider = objectMapperProvider;
     }
 
@@ -171,6 +193,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
             return;
         }
         resolveClients();
+        startUtilisationReporting();
         executor = Executors.newFixedThreadPool(listeners, runnable -> {
             Thread thread = new Thread(runnable, "euclid-listener");
             thread.setDaemon(false);
@@ -367,6 +390,70 @@ public class EuclidListenerContainer implements SmartLifecycle {
         }
     }
 
+        /**
+     * How often utilisation is reported, in seconds.
+     *
+     * <p>Matched to the autoscaler's own reconcile cadence: reporting faster gives it nothing to
+     * act on sooner, and reporting much slower would let a burst come and go between two samples.
+     */
+    private static final long UTILISATION_PERIOD_SECONDS = 15;
+
+    /**
+     * Reports how hard this instance is working, so the autoscaler can act on it.
+     *
+     * <p>Only when running as a euclid application: {@code EUCLID_INSTANCE_ID} is set by the
+     * manager for the process it started, and without it there is no instance for a measurement to
+     * be about - a listener running on a developer's laptop has nothing to scale.
+     */
+    private void startUtilisationReporting() {
+
+        final String instanceId = System.getenv("EUCLID_INSTANCE_ID");
+        final String applicationId = System.getenv("EUCLID_APPLICATION_ID");
+        if (instanceId == null || instanceId.isBlank()) {
+            logger.debug("Not reporting utilisation: no EUCLID_INSTANCE_ID, so this process is not a euclid application instance");
+            return;
+        }
+
+        final EuclidEmo euclidEmo = euclidEmoProvider.getIfAvailable();
+        if (euclidEmo == null) {
+            logger.debug("Not reporting utilisation: no EuclidEmo bean available");
+            return;
+        }
+
+        final int capacity = concurrencySum(queueRegistrations) + concurrencySum(topicRegistrations)
+                             + concurrencySum(bucketRegistrations);
+        ensureScheduler();
+        heartbeats.scheduleAtFixedRate(() -> {
+            try {
+                long now = System.nanoTime();
+                long windowStart = windowStartNanos.getAndSet(now);
+                long busy = busyNanos.getAndSet(0);
+                long elapsed = now - windowStart;
+                if (elapsed <= 0 || capacity <= 0) {
+                    return;
+                }
+
+                // Against capacity, not the clock: a listener sized for eight concurrent handlers
+                // with four of them running is half loaded, not fully. Dividing by elapsed alone
+                // would report 400% and make every multi-threaded listener look saturated the
+                // moment two messages arrived together.
+                double utilisation = 100.0 * busy / ((double) elapsed * capacity);
+                euclidEmo.pushMetrics(applicationId == null ? "application" : applicationId,
+                                      List.of(Metric.gauge("application-utilisation", "instance", instanceId,
+                                                           Math.min(100.0, utilisation))));
+
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                // Never fatal, and never noisy: the listeners are the point of this process and a
+                // monitoring push that cannot get through must not stop them or fill the log.
+                logger.debug("Could not report utilisation", e);
+            }
+        }, UTILISATION_PERIOD_SECONDS, UTILISATION_PERIOD_SECONDS, TimeUnit.SECONDS);
+
+        logger.info("Reporting utilisation for instance "+instanceId+" every "+UTILISATION_PERIOD_SECONDS+"s, capacity "+capacity+" concurrent handlers");
+    }
+
     /**
      * Creates the heartbeat scheduler on first use. One thread for every bucket listener: a beat
      * is a single tag write, and a container with no bucket listeners should not hold a thread it
@@ -529,7 +616,15 @@ public class EuclidListenerContainer implements SmartLifecycle {
             Object arg = registration instanceof BucketRegistration
                     ? bucketArgument(message, paramType)
                     : messageArgument(message, paramType);
-            method.invoke(registration.bean(), arg);
+            // Timed around the handler alone, not around the receive that delivered the message:
+            // a long poll waiting for work is the opposite of being busy, and counting it would
+            // make an idle listener look fully loaded.
+            long startedAt = System.nanoTime();
+            try {
+                method.invoke(registration.bean(), arg);
+            } finally {
+                busyNanos.addAndGet(System.nanoTime() - startedAt);
+            }
             if (registration.autoDelete()) {
                 euclidSqs.deleteMessage(message.receiptHandle());
             }
