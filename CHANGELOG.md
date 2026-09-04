@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.14](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.13...euclid-spring-boot-starter-v0.1.14) (2026-09-04)
+
+
+### Bug Fixes
+
+* auto scaler instance reporting ([9936612](https://github.com/jensvogt/euclid-spring/commit/993661234f05b0db917f03e79b35b98da5ca97e1))
+
 ## [0.1.13](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.12...euclid-spring-boot-starter-v0.1.13) (2026-09-04)
 
 
