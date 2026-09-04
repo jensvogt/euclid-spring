@@ -100,6 +100,14 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private final AtomicLong busyNanos = new AtomicLong();
 
     /**
+     * Every queue this process is polling, however its listener arrived at one - named outright,
+     * subscribed to a topic, or created for a bucket's object events. Recorded where they are all
+     * the same thing (a queue being polled) rather than per listener type, so a listener kind
+     * added later is covered without anyone remembering to.
+     */
+    private final Set<String> polledQueueErns = ConcurrentHashMap.newKeySet();
+
+    /**
      * When the current measurement window began, so utilisation is a fraction of elapsed capacity
      * rather than of an assumed interval.
      */
@@ -438,9 +446,22 @@ public class EuclidListenerContainer implements SmartLifecycle {
                 // would report 400% and make every multi-threaded listener look saturated the
                 // moment two messages arrived together.
                 double utilisation = 100.0 * busy / ((double) elapsed * capacity);
+
+                // Utilisation alone cannot tell "working through a burst, nearly done" from
+                // "cannot keep up": both read as busy. The depth of what is still waiting is the
+                // other half, and this process is the only party that knows which queues those
+                // are - a bucket listener's delivery queue is created at runtime and named after
+                // this run.
+                //
+                // Labelled by instance like the utilisation beside it, not by application: EMO
+                // averages the samples that share a label, so three instances reporting their own
+                // depth under one application label would report the mean rather than the total.
+                // The reader sums the series instead.
                 euclidEmo.pushMetrics(applicationId == null ? "application" : applicationId,
                                       List.of(Metric.gauge("application-utilisation", "instance", instanceId,
-                                                           Math.min(100.0, utilisation))));
+                                                           Math.min(100.0, utilisation)),
+                                              Metric.gauge("application-backlog", "instance", instanceId,
+                                                           backlog())));
 
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -452,6 +473,30 @@ public class EuclidListenerContainer implements SmartLifecycle {
         }, UTILISATION_PERIOD_SECONDS, UTILISATION_PERIOD_SECONDS, TimeUnit.SECONDS);
 
         logger.info("Reporting utilisation for instance "+instanceId+" every "+UTILISATION_PERIOD_SECONDS+"s, capacity "+capacity+" concurrent handlers");
+    }
+
+        /**
+     * How many messages are waiting across the queues this process polls.
+     *
+     * <p>Best effort: a queue that cannot be counted contributes nothing rather than failing the
+     * whole report, since a backlog that is missing one queue is still far more useful than no
+     * backlog at all.
+     *
+     * @return the total available message count
+     */
+    private double backlog() {
+        long total = 0;
+        for (String ern : polledQueueErns) {
+            try {
+                total += euclidSqs.getMessageCount(ern).available();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return total;
+            } catch (Exception e) {
+                logger.debug("Could not count messages of " + ern, e);
+            }
+        }
+        return total;
     }
 
     /**
@@ -770,6 +815,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
     }
 
     private void pollMessages(MessageRegistration registration, String ern) {
+        polledQueueErns.add(ern);
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 List<Message> messages = euclidSqs
