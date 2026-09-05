@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.17](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.16...euclid-spring-boot-starter-v0.1.17) (2026-09-05)
+
+
+### Bug Fixes
+
+* stop polling immediately ([ead5cb7](https://github.com/jensvogt/euclid-spring/commit/ead5cb7f6a4b4f00fde305d09298ff399e9d17ec))
+* stop polling immediately ([c5d6edc](https://github.com/jensvogt/euclid-spring/commit/c5d6edc6687d4e08f4a1d4e24e9946a718d63200))
+
 ## [0.1.16](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.15...euclid-spring-boot-starter-v0.1.16) (2026-09-05)
 
 
