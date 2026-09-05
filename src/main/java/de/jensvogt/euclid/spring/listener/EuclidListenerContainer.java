@@ -120,6 +120,14 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private final AtomicLong windowStartNanos = new AtomicLong(System.nanoTime());
 
     private EuclidEqs euclidSqs;
+
+    /**
+     * The same EQS client, marked as internal traffic, for the calls this container makes about
+     * the system rather than on behalf of a listener: reading a queue's depth to report it, and
+     * keeping a bucket delivery queue's heartbeat fresh. Both poll every few seconds, and counted
+     * as load they would hold EQS awake for as long as this application runs.
+     */
+    private EuclidEqs euclidSqsInternal;
     private EuclidEsm euclidEsm;
     private EuclidEns euclidEns;
     private JsonMapper jsonMapper;
@@ -395,7 +403,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
 
     private void touchHeartbeat(String queueErn) {
         try {
-            euclidSqs.setQueueTag(queueErn, HEARTBEAT_TAG, Instant.now().toString());
+            euclidSqsInternal.setQueueTag(queueErn, HEARTBEAT_TAG, Instant.now().toString());
         } catch (Exception e) {
             logger.debug("Could not refresh the heartbeat of queue " + queueErn, e);
             if (e instanceof InterruptedException) {
@@ -513,7 +521,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
         long total = 0;
         for (String ern : polledQueueErns) {
             try {
-                total += euclidSqs.getMessageCount(ern).available();
+                total += euclidSqsInternal.getMessageCount(ern).available();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return total;
@@ -612,6 +620,9 @@ public class EuclidListenerContainer implements SmartLifecycle {
         if (!bucketRegistrations.isEmpty()) {
             euclidSqs = euclidSqsProvider.getObject();
             euclidEsm = euclidEsmProvider.getObject();
+        }
+        if (euclidSqs != null) {
+            euclidSqsInternal = euclidSqs.asInternal();
         }
         jsonMapper = objectMapperProvider.getIfAvailable(JsonMapper::new);
         // An event payload carries every field ESM publishes, so a handler taking a type of its
