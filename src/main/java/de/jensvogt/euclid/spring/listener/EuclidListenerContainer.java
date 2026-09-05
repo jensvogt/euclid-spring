@@ -421,6 +421,31 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private static final long UTILISATION_PERIOD_SECONDS = 15;
 
     /**
+     * How many reporting ticks pass between backlog readings.
+     *
+     * <p>Utilisation is free - a counter this process already keeps - but backlog is a call to EQS
+     * for every queue this process polls, and every instance of an application polls the same
+     * queues. Twenty instances of a listener with ten queues is two hundred calls a tick, for ten
+     * numbers.
+     *
+     * <p>Reading it less often costs nothing that matters: EMO accumulates whatever arrives into
+     * five-minute buckets before the autoscaler can see any of it, so a queue depth sampled every
+     * fifteen seconds and one sampled every minute reach it as the same row.
+     */
+    private static final int BACKLOG_EVERY_N_TICKS = 4;
+
+    /**
+     * Counts reporting ticks, so backlog can be read on some of them and not others.
+     */
+    private final AtomicLong loadTicks = new AtomicLong();
+
+    /**
+     * The last backlog reading, reported again on the ticks that do not take a new one - a gauge
+     * that vanished between samples would read as "no work waiting" rather than "not asked".
+     */
+    private final AtomicLong lastBacklog = new AtomicLong();
+
+    /**
      * Reports how hard this instance is working, so the autoscaler can act on it.
      *
      * <p>Only when running as a euclid application: {@code EUCLID_INSTANCE_ID} is set by the
@@ -486,7 +511,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
                                       List.of(Metric.gauge("application-utilisation", "instance", instanceId,
                                                            Math.min(100.0, utilisation)),
                                               Metric.gauge("application-backlog", "instance", instanceId,
-                                                           backlog())));
+                                                           currentBacklog())));
 
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -517,6 +542,19 @@ public class EuclidListenerContainer implements SmartLifecycle {
      *
      * @return the total available message count
      */
+    /**
+     * The backlog to report on this tick: freshly counted every {@link #BACKLOG_EVERY_N_TICKS},
+     * and the previous reading in between.
+     *
+     * @return messages waiting across the queues this process polls
+     */
+    private double currentBacklog() {
+        if (loadTicks.getAndIncrement() % BACKLOG_EVERY_N_TICKS == 0) {
+            lastBacklog.set((long) backlog());
+        }
+        return lastBacklog.get();
+    }
+
     private double backlog() {
         long total = 0;
         for (String ern : polledQueueErns) {
@@ -552,19 +590,45 @@ public class EuclidListenerContainer implements SmartLifecycle {
         if (!running.compareAndSet(true, false)) {
             return;
         }
+        final long startedAt = System.nanoTime();
         if (heartbeats != null) {
             heartbeats.shutdownNow();
             heartbeats = null;
         }
-        closeBucketDeliveries();
+
+        // The pollers are stopped before anything else is attempted, and by interrupting rather
+        // than by asking. Clearing "running" only takes effect when a poll returns, and a poll is
+        // deliberately parked for as long as its wait time - twenty seconds by default - so a
+        // container that merely stops re-issuing them still takes that long to go quiet. Whoever
+        // is shutting this process down is rarely willing to wait: euclid sends SIGKILL five
+        // seconds after SIGTERM, so a container that waits out one long poll is killed rather than
+        // stopped.
+        //
+        // A handler running at this moment is interrupted too, which is the price. It costs
+        // nothing that is not already handled: a message is deleted only after its handler
+        // returns, so one abandoned here keeps its lease, becomes visible again when the lease
+        // expires, and is delivered to whoever is running next.
         if (executor != null) {
             executor.shutdownNow();
+        }
+
+        // After the polling has been told to stop, not before. This deletes the delivery queue and
+        // its subscription over the network, and doing it while this container's own long polls
+        // are still parked against the same modules is asking to wait behind them.
+        closeBucketDeliveries();
+
+        if (executor != null) {
             try {
-                executor.awaitTermination(5, TimeUnit.SECONDS);
+                // Short, because by now the threads have been interrupted and have nothing left to
+                // do. Waiting longer would only delay a shutdown that has already happened.
+                if (!executor.awaitTermination(2, TimeUnit.SECONDS)) {
+                    logger.warn("Listener threads did not stop within 2s of being interrupted");
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
+        logger.info("Listener container stopped in " + (System.nanoTime() - startedAt) / 1_000_000 + "ms");
     }
 
     /**
@@ -863,7 +927,18 @@ public class EuclidListenerContainer implements SmartLifecycle {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (Exception e) {
-                logger.error("Error polling " + registration.describe(), e);
+                // A poll that fails while this container is stopping is not a fault to report. The
+                // request was in flight when the application was asked to shut down, and it is
+                // being torn down along with everything else - the connection it was waiting on is
+                // closed underneath it and it surfaces here as a timeout. Logged as an error, that
+                // reads as though euclid had gone away, and it is the last thing in the log before
+                // the process exits, which is where somebody looks first when a shutdown goes
+                // wrong.
+                if (!running.get() || Thread.currentThread().isInterrupted()) {
+                    logger.debug("Poll of " + registration.describe() + " ended during shutdown", e);
+                } else {
+                    logger.error("Error polling " + registration.describe(), e);
+                }
             }
         }
     }
