@@ -4,7 +4,7 @@
 
     <groupId>io.github.jensvogt</groupId>
     <artifactId>euclid-spring-boot-starter</artifactId>
-    <version>0.1.15</version>
+    <version>0.1.16</version>
     <name>euclid-spring-boot-starter</name>
     <description>Spring Boot autoconfiguration and @Listeners support for euclid-jdk</description>
     <packaging>jar</packaging>

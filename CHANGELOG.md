@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.16](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.15...euclid-spring-boot-starter-v0.1.16) (2026-09-05)
+
+
+### Bug Fixes
+
+* stop immediately after shutdown, even when in a long poll ([c854773](https://github.com/jensvogt/euclid-spring/commit/c854773eddd689dbd1678e5e08dbff3685b38f31))
+* stop immediately after shutdown, even when in a long poll ([3035e3c](https://github.com/jensvogt/euclid-spring/commit/3035e3c9647b716174619d7622eba653e5f19519))
+
 ## [0.1.15](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.14...euclid-spring-boot-starter-v0.1.15) (2026-09-05)
 
 
