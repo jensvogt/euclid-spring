@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.15](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.14...euclid-spring-boot-starter-v0.1.15) (2026-09-05)
+
+
+### Bug Fixes
+
+* auto scaler internal traffic client for EQS operations ([fb014fe](https://github.com/jensvogt/euclid-spring/commit/fb014fe09bbcc7c36a3a72ddc973203af44b677f))
+* auto scaler internal traffic client for EQS operations ([3942ec3](https://github.com/jensvogt/euclid-spring/commit/3942ec3ca86dc5d2bf090928666d46b107aa940e))
+
 ## [0.1.14](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.13...euclid-spring-boot-starter-v0.1.14) (2026-09-04)
 
 
