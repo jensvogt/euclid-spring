@@ -521,7 +521,12 @@ public class EuclidListenerContainer implements SmartLifecycle {
                 // loud - a reporter that never succeeds looks exactly like one that was never
                 // started, and that is a difference worth one log line. Every failure after it
                 // drops to debug, so a broken endpoint cannot fill the log.
-                if (loadReportFailed.compareAndSet(false, true)) {
+                if (!running.get()) {
+                    // The same failure the pollers see on the way out, for the same reason: this
+                    // process is stopping and what it was reporting to is either gone or about to
+                    // be. A warning here would be the loudest line in a clean shutdown.
+                    logger.debug("Load report ended during shutdown", e);
+                } else if (loadReportFailed.compareAndSet(false, true)) {
                     logger.warn("Could not report load for instance " + instanceId
                                         + "; the autoscaler will not see this instance until it succeeds", e);
                 } else {
