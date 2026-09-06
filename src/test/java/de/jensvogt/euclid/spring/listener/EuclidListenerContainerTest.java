@@ -24,11 +24,9 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.ObjectProvider;
 import tools.jackson.databind.json.JsonMapper;
 
-import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -42,10 +40,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -78,6 +74,8 @@ class EuclidListenerContainerTest {
         when(euclidEsm.subscribe(anyString(), anyString(), anyString(), anyList(), anyString(), anyBoolean()))
                 .thenReturn(SubscribeResponse.builder().ern("subscription-ern").build());
         when(euclidEqs.createQueue(anyString(), anyLong(), anyLong(), anyLong(), anyString()))
+                .thenReturn(CreateQueueResponse.builder().name("delivery").ern("delivery-ern").build());
+        when(euclidEqs.createQueue(anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyLong(), anyString(), anyBoolean()))
                 .thenReturn(CreateQueueResponse.builder().name("delivery").ern("delivery-ern").build());
         when(euclidEqs.listQueues(anyString(), anyLong(), anyLong(), anyString()))
                 .thenReturn(ListQueueResponse.builder().queues(Collections.emptyList()).total(0).build());
@@ -164,7 +162,7 @@ class EuclidListenerContainerTest {
         container.start();
 
         ArgumentCaptor<String> queueName = ArgumentCaptor.forClass(String.class);
-        verify(euclidEqs, timeout(1000)).createQueue(queueName.capture(), eq(300L), anyLong(), anyLong(), eq(""));
+        verify(euclidEqs, timeout(1000)).createQueue(queueName.capture(), eq(300L), anyLong(), anyLong(), eq(""), anyLong(), eq("MIDDLE"), anyBoolean());
         // The run id keeps this run's queue apart from one another run of the same listener owns.
         assertTrue(queueName.getValue().startsWith("invoice-import-"), queueName.getValue());
         verify(euclidEsm, timeout(1000)).subscribe("bucket-ern", "SQS", "delivery-ern", OBJECT_EVENTS, "reports/",
