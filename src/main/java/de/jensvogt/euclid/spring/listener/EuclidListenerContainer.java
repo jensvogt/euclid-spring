@@ -317,7 +317,11 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private void sweepOrphanedQueues(BucketRegistration registration, String bucketErn) {
         try {
             String queuePrefix = registration.queueName() + "-";
-            List<Queue> queues = euclidSqs.listQueues(queuePrefix, SWEEP_PAGE_SIZE, 0, "name").queues();
+            // Asking for internal queues, because these are internal queues. A delivery queue is
+            // created with that flag so it stays out of listings people read, which also keeps it
+            // out of this one unless it is asked for - and a sweep that cannot see the queues it
+            // is sweeping deletes nothing at all.
+            List<Queue> queues = euclidSqs.listQueues(queuePrefix, SWEEP_PAGE_SIZE, 0, "name", "asc", true).queues();
             Instant stale = Instant.now().minusSeconds(HEARTBEAT_STALE_SECONDS);
             Set<String> keptQueueErns = new HashSet<>();
             for (Queue queue : queues == null ? List.<Queue>of() : queues) {
