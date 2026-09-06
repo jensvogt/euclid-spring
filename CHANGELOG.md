@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.20](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.19...euclid-spring-boot-starter-v0.1.20) (2026-09-06)
+
+
+### Bug Fixes
+
+* orphaned queues removal - add internal ([2572425](https://github.com/jensvogt/euclid-spring/commit/2572425228f0728e855a77ccf28104f465fcda34))
+
 ## [0.1.19](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.18...euclid-spring-boot-starter-v0.1.19) (2026-09-06)
 
 
