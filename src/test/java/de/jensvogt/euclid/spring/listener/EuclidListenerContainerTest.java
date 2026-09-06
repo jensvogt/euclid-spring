@@ -1,5 +1,6 @@
 package de.jensvogt.euclid.spring.listener;
 
+import de.jensvogt.euclid.dto.com.Variant;
 import de.jensvogt.euclid.dto.ees.model.Event;
 import de.jensvogt.euclid.dto.ens.GetTopicErnResponse;
 import de.jensvogt.euclid.dto.ens.ListSubscriptionsResponse;
@@ -223,7 +224,7 @@ class EuclidListenerContainerTest {
         assertEquals("esm.object.created", event.eventType());
         // The queue's own two: which delivery this is, and whether it is a redelivery.
         assertEquals("123", event.eventId());
-        assertEquals(2, event.attempts());
+        assertEquals(1, event.attempts());
         assertEquals("reports/q3.csv", event.payload().get("key"));
         verify(euclidEqs, timeout(1000)).deleteMessage("receipt-1");
     }
@@ -415,8 +416,8 @@ class EuclidListenerContainerTest {
     }
 
     private Message message(String body) {
-        return new Message("ern", "queue-ern", "123", "AVAILABLE", "HIGH", body, "md5-body", "receipt-1",
-                2, body.length(), "application/json", Map.of(), "md5-attributes", "now", "now", "now");
+        return new Message("ern", "queue-ern", "123", "AVAILABLE", "HIGH", body, "receipt-1",
+                body.length(), 1, "application/json", Map.of(), Map.of(),"now", "now", "now");
     }
 
     /** A queue ERN as the server forms it: the name is its last segment. */
