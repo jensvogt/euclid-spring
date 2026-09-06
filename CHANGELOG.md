@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.19](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.18...euclid-spring-boot-starter-v0.1.19) (2026-09-06)
+
+
+### Bug Fixes
+
+* add header fields for internal flag ([9d27940](https://github.com/jensvogt/euclid-spring/commit/9d279409c2ac1242f1d5d2a17cadaa27581c8a73))
+* add header fields for internal flag ([e2c52c0](https://github.com/jensvogt/euclid-spring/commit/e2c52c051fb46ba55762c03d6972843b1e95021a))
+
 ## [0.1.18](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.17...euclid-spring-boot-starter-v0.1.18) (2026-09-06)
 
 
