@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.21](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.20...euclid-spring-boot-starter-v0.1.21) (2026-09-06)
+
+
+### Bug Fixes
+
+* stop queues on demand and add retry logic ([2fe4354](https://github.com/jensvogt/euclid-spring/commit/2fe4354ea17c04199bb4e2640aa16ce9b50618ea))
+* stop queues on demand and add retry logic ([5fa5ea6](https://github.com/jensvogt/euclid-spring/commit/5fa5ea6bb66b633cf11d90f35f5cca6bd8563830))
+
 ## [0.1.20](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.19...euclid-spring-boot-starter-v0.1.20) (2026-09-06)
 
 
