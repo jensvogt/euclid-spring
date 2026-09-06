@@ -43,6 +43,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.atMost;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
@@ -137,6 +138,45 @@ class EuclidListenerContainerTest {
         container.start();
 
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals(theMessage, handler.received));
+    }
+
+    /**
+     * Stopping a queue is an operator's instruction, not a fault. EQS refuses the receive with a
+     * 409, which arrives here as an exception - and without recognising it, the listener would
+     * treat a deliberately stopped queue as a failure and retry it as fast as the refusals came
+     * back, which is harder than it polls a running one.
+     */
+    @Test
+    void stoppedQueueIsNotPolledInATightLoop() throws Exception {
+        when(euclidEqs.receiveMessages(anyString(), anyLong(), anyLong()))
+                .thenThrow(new EuclidServiceException("eqs", "receive-messages", 409, "Queue is stopped, ern: test-ern"));
+        TypedHandler handler = new TypedHandler();
+        container.register(handler, TypedHandler.class.getMethod("handle", TestPayload.class),
+                "test-queue", 10, 0, true, 1);
+
+        container.start();
+
+        // A second of a stopped queue at the 5s retry is one or two attempts. Unrecognised it
+        // would be thousands, since the refusal comes back without the long poll being held.
+        Thread.sleep(1000);
+        verify(euclidEqs, atMost(2)).receiveMessages(anyString(), anyLong(), anyLong());
+    }
+
+    /** Nothing is polled to notice the queue came back - the next receive succeeding is what says so. */
+    @Test
+    void stoppedQueueResumesOnceItIsAvailableAgain() throws Exception {
+        when(euclidEqs.receiveMessages(anyString(), anyLong(), anyLong()))
+                .thenThrow(new EuclidServiceException("eqs", "receive-messages", 409, "Queue is stopped, ern: test-ern"))
+                .thenReturn(ReceiveMessagesResponse.builder()
+                        .messages(List.of(message("{\"name\":\"abc\",\"value\":5}"))).total(1).build());
+        TypedHandler handler = new TypedHandler();
+        container.register(handler, TypedHandler.class.getMethod("handle", TestPayload.class),
+                "test-queue", 10, 0, true, 1);
+
+        container.start();
+
+        await().atMost(Duration.ofSeconds(15))
+                .untilAsserted(() -> assertEquals(new TestPayload("abc", 5), handler.received));
     }
 
     @Test

@@ -21,6 +21,7 @@ import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.UUID;
@@ -77,6 +78,18 @@ public class EuclidListenerContainer implements SmartLifecycle {
 
     /** How many queues one sweep looks at - far more than an application has listeners. */
     private static final long SWEEP_PAGE_SIZE = 200;
+
+    /** The status EQS refuses a receive on a stopped queue with. */
+    private static final int HTTP_CONFLICT = 409;
+
+    /**
+     * How long a listener waits before asking again while its queue is stopped.
+     *
+     * <p>Short enough that starting the queue again feels immediate to whoever did it, long enough
+     * that a queue left stopped is not a stream of requests. Nothing is polled to discover the
+     * change - the next receive succeeding is what says the queue is back.
+     */
+    private static final Duration QUEUE_STOPPED_RETRY = Duration.ofSeconds(5);
 
     /** Queue settings a delivery queue is created with, beyond its visibility timeout. */
     private static final long DEFAULT_MAX_RETRIES = 3;
@@ -941,11 +954,16 @@ public class EuclidListenerContainer implements SmartLifecycle {
 
     private void pollMessages(MessageRegistration registration, String ern) {
         polledQueueErns.add(ern);
+        boolean stopped = false;
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 List<Message> messages = euclidSqs
                         .receiveMessages(ern, registration.maxMessages(), registration.waitTime())
                         .messages();
+                if (stopped) {
+                    logger.info("Queue of " + registration.describe() + " is available again, consuming resumed");
+                    stopped = false;
+                }
                 for (Message message : messages) {
                     dispatch(registration, message);
                 }
@@ -961,10 +979,47 @@ public class EuclidListenerContainer implements SmartLifecycle {
                 // wrong.
                 if (!running.get() || Thread.currentThread().isInterrupted()) {
                     logger.debug("Poll of " + registration.describe() + " ended during shutdown", e);
+                } else if (isQueueStopped(e)) {
+                    // Somebody stopped the queue, which is an instruction rather than a fault, so
+                    // it is not reported as one. Said once on the way in and once on the way out:
+                    // repeating it every few seconds would bury the reason somebody stopped the
+                    // queue under the consequence of having stopped it.
+                    if (!stopped) {
+                        logger.info("Queue of " + registration.describe()
+                                            + " is stopped, consuming paused until it is available again");
+                        stopped = true;
+                    }
+                    // The refusal comes back at once - EQS checks the queue's status before it
+                    // would have held the long poll - so without a wait here a stopped queue would
+                    // be asked harder than a running one, which is the opposite of what stopping
+                    // it was for.
+                    sleepQuietly(QUEUE_STOPPED_RETRY.toMillis());
                 } else {
                     logger.error("Error polling " + registration.describe(), e);
                 }
             }
+        }
+    }
+
+    /**
+     * Whether a poll failed because the queue is stopped rather than because anything went wrong.
+     *
+     * <p>EQS refuses a receive on a stopped queue rather than answering it with an empty list, so
+     * that a stopped queue stays distinguishable from one nobody happens to be writing to - which
+     * is exactly the distinction whoever stopped it needs to be able to make. That refusal arrives
+     * here as a 409.
+     */
+    private static boolean isQueueStopped(Exception e) {
+        return e instanceof EuclidServiceException serviceException
+               && serviceException.statusCode() == HTTP_CONFLICT;
+    }
+
+    /** Waits without turning an interrupt into a failure - the loop's own check handles that. */
+    private static void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 }
