@@ -1,6 +1,7 @@
 package de.jensvogt.euclid.spring.listener;
 
 import de.jensvogt.euclid.spring.annotation.BucketListener;
+import org.jspecify.annotations.NonNull;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.BeanPostProcessor;
@@ -34,12 +35,12 @@ public class BucketListenerBeanPostProcessor implements BeanPostProcessor, Embed
     }
 
     @Override
-    public void setEmbeddedValueResolver(StringValueResolver resolver) {
+    public void setEmbeddedValueResolver(@NonNull StringValueResolver resolver) {
         this.embeddedValueResolver = resolver;
     }
 
     @Override
-    public Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
+    public Object postProcessAfterInitialization(Object bean, @NonNull String beanName) throws BeansException {
         ReflectionUtils.doWithMethods(bean.getClass(), method -> {
             BucketListener annotation = method.getAnnotation(BucketListener.class);
             String bucket = resolve(annotation.value());

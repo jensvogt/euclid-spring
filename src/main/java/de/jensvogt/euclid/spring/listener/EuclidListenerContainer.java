@@ -106,7 +106,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private final AtomicBoolean loadReportFailed = new AtomicBoolean(false);
 
     /**
-     * Every queue this process is polling, however its listener arrived at one - named outright,
+     * Every queue this process is polling, however, its listener arrived at one - named outright,
      * subscribed to a topic, or created for a bucket's object events. Recorded where they are all
      * the same thing (a queue being polled) rather than per listener type, so a listener kind
      * added later is covered without anyone remembering to.
@@ -209,8 +209,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
 
     @Override
     public void start() {
-        int listeners = concurrencySum(queueRegistrations) + concurrencySum(topicRegistrations)
-                + concurrencySum(bucketRegistrations);
+        int listeners = concurrencySum(queueRegistrations) + concurrencySum(topicRegistrations) + concurrencySum(bucketRegistrations);
         if (listeners == 0 || !running.compareAndSet(false, true)) {
             return;
         }
@@ -285,7 +284,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
         // The visibility timeout is the queue's, not the message's: it is what gives a handler
         // that dies mid-work its event back rather than losing it.
         String queueErn = euclidSqs.createQueue(queueName, registration.visibilityTimeout(), DEFAULT_MAX_RETRIES,
-                DEFAULT_MAX_MESSAGE_LENGTH, "").ern();
+                DEFAULT_MAX_MESSAGE_LENGTH, "", 0, "MIDDLE", true).ern();
         touchHeartbeat(queueErn);
 
         String subscriptionErn = euclidEsm.subscribe(bucketErn, "SQS", queueErn, registration.eventTypes(),
