@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.18](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.17...euclid-spring-boot-starter-v0.1.18) (2026-09-06)
+
+
+### Bug Fixes
+
+* add internal flag to queues to control user visibility ([3715ee1](https://github.com/jensvogt/euclid-spring/commit/3715ee12c7472ec902ed1b43fdeaffb4b5329314))
+* add internal flag to queues to control user visibility ([50f14ef](https://github.com/jensvogt/euclid-spring/commit/50f14ef75bf708197d2e08fc6d988589f5e8ee76))
+
 ## [0.1.17](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.16...euclid-spring-boot-starter-v0.1.17) (2026-09-05)
 
 
