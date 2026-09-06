@@ -77,7 +77,7 @@ class EuclidListenerContainerTest {
                 .thenReturn(CreateQueueResponse.builder().name("delivery").ern("delivery-ern").build());
         when(euclidEqs.createQueue(anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyLong(), anyString(), anyBoolean()))
                 .thenReturn(CreateQueueResponse.builder().name("delivery").ern("delivery-ern").build());
-        when(euclidEqs.listQueues(anyString(), anyLong(), anyLong(), anyString()))
+        when(euclidEqs.listQueues(anyString(), anyLong(), anyLong(), anyString(), anyString(), anyBoolean()))
                 .thenReturn(ListQueueResponse.builder().queues(Collections.emptyList()).total(0).build());
 
         euclidEns = mock(EuclidEns.class);
@@ -219,7 +219,7 @@ class EuclidListenerContainerTest {
 
     @Test
     void sweepsOnlyTheQueuesWhoseOwnerStoppedSayingItWasAlive() throws Exception {
-        when(euclidEqs.listQueues(anyString(), anyLong(), anyLong(), anyString())).thenReturn(
+        when(euclidEqs.listQueues(anyString(), anyLong(), anyLong(), anyString(), anyString(), anyBoolean())).thenReturn(
                 ListQueueResponse.builder().queues(List.of(
                         queue("invoice-import-dead", "crashed-ern", Instant.now().minusSeconds(3600)),
                         queue("invoice-import-live", "live-ern", Instant.now()))).total(2).build());
@@ -233,6 +233,12 @@ class EuclidListenerContainerTest {
         // A live instance's queue looks exactly like a crashed one's but for the heartbeat, so
         // sweeping it would take another listener's deliveries with it.
         verify(euclidEqs, never()).deleteQueue("live-ern");
+
+        // Delivery queues are created internal so they stay out of listings people read, which
+        // also keeps them out of this one unless it asks. A sweep that does not ask sees nothing,
+        // deletes nothing - and, worse, treats every subscription as orphaned because no queue
+        // survived to keep it.
+        verify(euclidEqs, timeout(1000)).listQueues(anyString(), anyLong(), anyLong(), anyString(), anyString(), eq(true));
     }
 
     /**
@@ -244,7 +250,7 @@ class EuclidListenerContainerTest {
     void sweepsTheSubscriptionsOfQueuesThatAreGone() throws Exception {
         String deadErn = queueErnOf("invoice-import-dead");
         String liveErn = queueErnOf("invoice-import-live");
-        when(euclidEqs.listQueues(anyString(), anyLong(), anyLong(), anyString())).thenReturn(
+        when(euclidEqs.listQueues(anyString(), anyLong(), anyLong(), anyString(), anyString(), anyBoolean())).thenReturn(
                 ListQueueResponse.builder().queues(List.of(
                         queue("invoice-import-dead", deadErn, Instant.now().minusSeconds(3600)),
                         queue("invoice-import-live", liveErn, Instant.now()))).total(2).build());
