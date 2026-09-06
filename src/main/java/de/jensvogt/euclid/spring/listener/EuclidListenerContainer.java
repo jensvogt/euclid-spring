@@ -82,6 +82,14 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private static final long DEFAULT_MAX_RETRIES = 3;
     private static final long DEFAULT_MAX_MESSAGE_LENGTH = 1024 * 1024;
 
+    /**
+     * The two a bucket listener names itself, and a topic listener - whose queue is not per-run
+     * and has no annotation to take them from - does not. Same values {@code createQueue(name)}
+     * would have applied.
+     */
+    private static final long DEFAULT_VISIBILITY_SECONDS = 30;
+    private static final String DEFAULT_PRIORITY = "MIDDLE";
+
 
     private final ObjectProvider<EuclidEqs> euclidSqsProvider;
     private final ObjectProvider<EuclidEsm> euclidEsmProvider;
@@ -284,7 +292,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
         // The visibility timeout is the queue's, not the message's: it is what gives a handler
         // that dies mid-work its event back rather than losing it.
         String queueErn = euclidSqs.createQueue(queueName, registration.visibilityTimeout(), DEFAULT_MAX_RETRIES,
-                DEFAULT_MAX_MESSAGE_LENGTH, "", 0, "MIDDLE", true).ern();
+                DEFAULT_MAX_MESSAGE_LENGTH, "", 0, DEFAULT_PRIORITY, true).ern();
         touchHeartbeat(queueErn);
 
         String subscriptionErn = euclidEsm.subscribe(bucketErn, "SQS", queueErn, registration.eventTypes(),
@@ -905,6 +913,12 @@ public class EuclidListenerContainer implements SmartLifecycle {
     /**
      * The ERN of {@code queueName}, creating the queue if the server has none by that name - a
      * listener naming the queue its topic is delivered to should not also have to create it.
+     *
+     * <p>What it creates is an internal queue: where a topic listener's delivery queue came from
+     * this method it is plumbing, and offering it in list-queues invites somebody to act on a
+     * queue that is really an implementation detail of the subscription behind it. Being internal
+     * hides it from listings and nothing else - this method finds it again by name on the next
+     * start, which is what makes the queue outlive one run.
      */
     private String queueErn(String queueName) throws Exception {
         try {
@@ -915,7 +929,10 @@ public class EuclidListenerContainer implements SmartLifecycle {
         } catch (RuntimeException e) {
             logger.debug("Queue '" + queueName + "' could not be resolved, creating it", e);
         }
-        return euclidSqs.createQueue(queueName).ern();
+        // The defaults of createQueue(name), spelled out because saying "internal" means saying
+        // all of them.
+        return euclidSqs.createQueue(queueName, DEFAULT_VISIBILITY_SECONDS, DEFAULT_MAX_RETRIES,
+                DEFAULT_MAX_MESSAGE_LENGTH, "", 0, DEFAULT_PRIORITY, true).ern();
     }
 
     private void pollMessages(MessageRegistration registration, String ern) {

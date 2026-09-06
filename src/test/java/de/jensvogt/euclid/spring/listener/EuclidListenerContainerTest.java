@@ -162,7 +162,7 @@ class EuclidListenerContainerTest {
         container.start();
 
         ArgumentCaptor<String> queueName = ArgumentCaptor.forClass(String.class);
-        verify(euclidEqs, timeout(1000)).createQueue(queueName.capture(), eq(300L), anyLong(), anyLong(), eq(""), anyLong(), eq("MIDDLE"), anyBoolean());
+        verify(euclidEqs, timeout(1000)).createQueue(queueName.capture(), eq(300L), anyLong(), anyLong(), eq(""), anyLong(), eq("MIDDLE"), eq(true));
         // The run id keeps this run's queue apart from one another run of the same listener owns.
         assertTrue(queueName.getValue().startsWith("invoice-import-"), queueName.getValue());
         verify(euclidEsm, timeout(1000)).subscribe("bucket-ern", "SQS", "delivery-ern", OBJECT_EVENTS, "reports/",
@@ -285,7 +285,8 @@ class EuclidListenerContainerTest {
         verify(euclidEns, timeout(1000)).getTopicErn("order-events");
         verify(euclidEqs, timeout(1000)).getQueueErn("orders-app");
         verify(euclidEns, never()).subscribe(anyString(), anyString());
-        verify(euclidEqs, never()).createQueue(anyString());
+        verify(euclidEqs, never()).createQueue(anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyLong(),
+                anyString(), anyBoolean());
         verify(euclidEqs, timeout(1000)).deleteMessage("receipt-1");
     }
 
@@ -293,7 +294,8 @@ class EuclidListenerContainerTest {
     void topicListenerCreatesTheDeliveryQueueAndSubscribesIt() throws Exception {
         when(euclidEqs.getQueueErn("orders-app"))
                 .thenThrow(new EuclidServiceException("eqs", "get-queue-ern", 404, "not found"));
-        when(euclidEqs.createQueue("orders-app"))
+        when(euclidEqs.createQueue(eq("orders-app"), anyLong(), anyLong(), anyLong(), anyString(), anyLong(),
+                anyString(), anyBoolean()))
                 .thenReturn(CreateQueueResponse.builder().name("orders-app").ern("orders-app-ern").build());
         when(euclidEns.listSubscriptions("topic-ern"))
                 .thenReturn(ListSubscriptionsResponse.builder().subscriptions(Collections.emptyList()).total(0).build());
@@ -304,7 +306,10 @@ class EuclidListenerContainerTest {
 
         container.start();
 
-        verify(euclidEqs, timeout(1000)).createQueue("orders-app");
+        // Internal: a topic listener's delivery queue is plumbing behind the subscription, and
+        // listing it invites somebody to act on a queue that is not theirs to act on.
+        verify(euclidEqs, timeout(1000)).createQueue(eq("orders-app"), anyLong(), anyLong(), anyLong(), eq(""),
+                anyLong(), eq("MIDDLE"), eq(true));
         verify(euclidEns, timeout(1000)).subscribe("topic-ern", "orders-app-ern");
         verify(euclidEqs, timeout(1000).atLeastOnce()).receiveMessages("orders-app-ern", 10, 0);
     }
