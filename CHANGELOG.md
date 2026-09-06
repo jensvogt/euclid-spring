@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.22](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.21...euclid-spring-boot-starter-v0.1.22) (2026-09-06)
+
+
+### Bug Fixes
+
+* priority issues ([5f35180](https://github.com/jensvogt/euclid-spring/commit/5f35180629e7bf6b75b43e9eeba6492ade3b90d5))
+* priority issues ([2803ccc](https://github.com/jensvogt/euclid-spring/commit/2803ccca312eddc2f2789a7d4459dd0d32923afb))
+
 ## [0.1.21](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.20...euclid-spring-boot-starter-v0.1.21) (2026-09-06)
 
 
