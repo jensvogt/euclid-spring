@@ -48,7 +48,7 @@ public class BucketListenerBeanPostProcessor implements BeanPostProcessor, Embed
             container.getObject().registerBucket(bean, method, queue(annotation, bucket, method), bucket,
                     resolve(annotation.prefix()), annotation.directories(), eventTypes, annotation.maxMessages(),
                     annotation.waitTime(), annotation.visibilityTimeout(), annotation.autoDelete(),
-                    annotation.concurrency());
+                    ListenerDefaults.concurrency(annotation.concurrency(), embeddedValueResolver));
         }, method -> method.getAnnotation(BucketListener.class) != null);
         return bean;
     }

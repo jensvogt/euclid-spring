@@ -72,6 +72,9 @@ public @interface TopicListener {
      * concurrent thread is no longer guaranteed to be handled in the order it was published, since
      * a slower thread can still be working on an older message while a faster one moves on to a
      * newer one.
+     *
+     * <p>Left at zero, the application-wide {@code euclid.listener.concurrency} decides, which is
+     * one unless it says otherwise.
      */
-    int concurrency() default 1;
+    int concurrency() default 0;
 }

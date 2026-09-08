@@ -202,5 +202,31 @@ A handler that throws leaves its event in the queue, to be delivered again once 
 
 ## Threading
 
-Each listener runs on its own daemon polling thread, managed by Spring's lifecycle (started on
-context refresh, stopped on context close).
+Each listener runs `concurrency` polling threads of its own, started when the context is refreshed
+and stopped when it closes. They are virtual threads: a poller spends its life parked in a long
+poll, which is what a virtual thread costs least to do.
+
+Each thread runs its own loop — receive a batch of up to `maxMessages`, hand the batch to the
+handler **one message at a time**, receive again. So a batch is never processed in parallel;
+parallelism comes only from having more than one thread, each fetching its own batch. With one
+thread and a handler taking a second, a batch of ten takes ten seconds and nothing else is fetched
+meanwhile.
+
+`concurrency` defaults to 1, and `euclid.listener.concurrency` changes that for every listener that
+does not set its own:
+
+```properties
+euclid.listener.concurrency=4
+```
+
+One is the default deliberately. A listener's threads are not a pool it borrows from — each is
+dedicated to that listener for the life of the application and holds a long poll open the whole
+time, so a higher default multiplies the requests parked against EQS by every listener in every
+application, busy or idle. One thread also keeps a queue's messages being handled in the order they
+arrived, which more than one cannot promise.
+
+Raise it when a handler blocks long enough that the queue grows while one thread works, and check
+that `visibilityTimeout` still comfortably exceeds `maxMessages` × handler time — otherwise the tail
+of a batch loses its lease and is delivered again while it is still being handled.
+
+Threads are named `euclid-<queue|topic|bucket>-<n>`, so a thread dump says which listener is busy.

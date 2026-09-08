@@ -26,6 +26,7 @@ import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -49,12 +50,14 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p>They poll different things. A queue listener receives the messages of one EQS queue. A topic
  * listener receives from the queue it subscribes to an ENS topic, since fanning out to queues is
- * the only delivery a topic has. A bucket listener holds a durable EES subscription filtered to one
- * bucket, so it accumulates only the object events it asked for, keeps them across restarts and
- * needs no queue to exist.
+ * the only delivery a topic has. A bucket listener receives from a queue of its own, which it
+ * subscribes to a bucket's object events and takes down again when the context closes - so all
+ * three are a queue poll once they have started.
  *
- * <p>Starts one polling thread per registration when the Spring context is refreshed, and stops
- * them all on context close.
+ * <p>Starts {@code concurrency} polling threads per registration when the Spring context is
+ * refreshed, and stops them all on context close. Each thread runs a loop of its own: receive a
+ * batch, hand the batch to the handler one message at a time, receive again. Messages are
+ * therefore handled in parallel only across threads, never within a batch.
  */
 public class EuclidListenerContainer implements SmartLifecycle {
 
@@ -228,6 +231,21 @@ public class EuclidListenerContainer implements SmartLifecycle {
                 eventTypes, maxMessages, waitTime, visibilityTimeout, autoDelete, concurrency));
     }
 
+    /**
+     * Holds the JVM open for as long as listeners are running.
+     *
+     * <p>The pollers used to be non-daemon platform threads and kept it open by existing. Virtual
+     * threads are always daemon, so an application whose only work is consuming would now reach
+     * the end of main() and exit with its listeners still running. One thread that does nothing
+     * but wait is what buys that back.
+     */
+    private Thread keepAlive;
+
+    /**
+     * Released by {@link #stop()}, which is the only thing {@link #keepAlive} is waiting for.
+     */
+    private CountDownLatch stopped;
+
     @Override
     public void start() {
         int listeners = concurrencySum(queueRegistrations) + concurrencySum(topicRegistrations) + concurrencySum(bucketRegistrations);
@@ -236,11 +254,12 @@ public class EuclidListenerContainer implements SmartLifecycle {
         }
         resolveClients();
         startUtilisationReporting();
-        executor = Executors.newFixedThreadPool(listeners, runnable -> {
-            Thread thread = new Thread(runnable, "euclid-listener");
-            thread.setDaemon(false);
-            return thread;
-        });
+        // One virtual thread per poller rather than a pool of platform threads. Every one of
+        // them spends its life parked in a long poll, which is what a virtual thread costs least
+        // to do, so what a listener's concurrency really costs is the requests it parks against
+        // EQS - not the threads it holds here.
+        executor = Executors.newVirtualThreadPerTaskExecutor();
+        startKeepAlive();
         for (QueueRegistration registration : queueRegistrations) {
             startQueueListener(registration);
         }
@@ -250,6 +269,19 @@ public class EuclidListenerContainer implements SmartLifecycle {
         for (BucketRegistration registration : bucketRegistrations) {
             startBucketListener(registration);
         }
+    }
+
+    private void startKeepAlive() {
+        stopped = new CountDownLatch(1);
+        keepAlive = new Thread(() -> {
+            try {
+                stopped.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }, "euclid-listener-keepalive");
+        keepAlive.setDaemon(false);
+        keepAlive.start();
     }
 
     /**
@@ -288,9 +320,10 @@ public class EuclidListenerContainer implements SmartLifecycle {
             // This thread becomes the first of the registration's pollers, so the executor holds
             // exactly the concurrency() threads start() sized it for.
             for (int i = 1; i < Math.max(1, registration.concurrency()); i++) {
-                executor.submit(() -> pollMessages(registration, queueErn));
+                final int index = i;
+                executor.submit(() -> pollMessages(registration, queueErn, index));
             }
-            pollMessages(registration, queueErn);
+            pollMessages(registration, queueErn, 0);
         });
     }
 
@@ -620,6 +653,11 @@ public class EuclidListenerContainer implements SmartLifecycle {
             return;
         }
         final long startedAt = System.nanoTime();
+        if (stopped != null) {
+            stopped.countDown();
+            stopped = null;
+            keepAlive = null;
+        }
         if (heartbeats != null) {
             heartbeats.shutdownNow();
             heartbeats = null;
@@ -737,7 +775,8 @@ public class EuclidListenerContainer implements SmartLifecycle {
             return;
         }
         for (int i = 0; i < Math.max(1, registration.concurrency()); i++) {
-            executor.submit(() -> pollMessages(registration, ern));
+            final int index = i;
+            executor.submit(() -> pollMessages(registration, ern, index));
         }
     }
 
@@ -759,7 +798,8 @@ public class EuclidListenerContainer implements SmartLifecycle {
             return;
         }
         for (int i = 0; i < Math.max(1, registration.concurrency()); i++) {
-            executor.submit(() -> pollMessages(registration, ern));
+            final int index = i;
+            executor.submit(() -> pollMessages(registration, ern, index));
         }
     }
 
@@ -885,6 +925,12 @@ public class EuclidListenerContainer implements SmartLifecycle {
         boolean autoDelete();
 
         /**
+         * What this listener is called where a name has to be short and have no spaces in it - a
+         * thread's, so a dump says which listener is busy rather than repeating one name.
+         */
+        String name();
+
+        /**
          * How this listener is named in a log line, from the caller's point of view rather than
          * the queue's - a topic listener that says "queue" leaves the reader looking for a queue
          * nobody wrote down.
@@ -896,6 +942,11 @@ public class EuclidListenerContainer implements SmartLifecycle {
                                      boolean autoDelete, int concurrency) implements MessageRegistration {
 
         @Override
+        public String name() {
+            return queueName;
+        }
+
+        @Override
         public String describe() {
             return "queue '" + queueName + "'";
         }
@@ -903,6 +954,11 @@ public class EuclidListenerContainer implements SmartLifecycle {
 
     private record TopicRegistration(Object bean, Method method, String topicName, String queueName, long maxMessages,
                                      long waitTime, boolean autoDelete, int concurrency) implements MessageRegistration {
+
+        @Override
+        public String name() {
+            return topicName;
+        }
 
         @Override
         public String describe() {
@@ -914,6 +970,11 @@ public class EuclidListenerContainer implements SmartLifecycle {
                                       boolean directories, List<String> eventTypes, long maxMessages, long waitTime,
                                       long visibilityTimeout, boolean autoDelete, int concurrency)
             implements MessageRegistration {
+
+        @Override
+        public String name() {
+            return bucketName;
+        }
 
         @Override
         public String describe() {
@@ -952,7 +1013,11 @@ public class EuclidListenerContainer implements SmartLifecycle {
                 DEFAULT_MAX_MESSAGE_LENGTH, "", 0, DEFAULT_PRIORITY, true).ern();
     }
 
-    private void pollMessages(MessageRegistration registration, String ern) {
+    private void pollMessages(MessageRegistration registration, String ern, int index) {
+        // Named here rather than by the thread factory: a virtual thread is created per task, so
+        // this is the only place that knows which listener the thread about to block belongs to -
+        // which is exactly what a thread dump is being read for.
+        Thread.currentThread().setName("euclid-" + registration.name() + "-" + index);
         polledQueueErns.add(ern);
         boolean stopped = false;
         while (running.get() && !Thread.currentThread().isInterrupted()) {

@@ -97,6 +97,9 @@ public @interface BucketListener {
      * claiming and dispatching events. Raise this when publishing outruns what one thread can
      * drain, or a handler is slow enough that throughput matters more than the order events are
      * handled in.
+     *
+     * <p>Left at zero, the application-wide {@code euclid.listener.concurrency} decides, which is
+     * one unless it says otherwise.
      */
-    int concurrency() default 1;
+    int concurrency() default 0;
 }

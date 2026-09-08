@@ -1,0 +1,10 @@
+{
+  "properties": [
+    {
+      "name": "euclid.listener.concurrency",
+      "type": "java.lang.Integer",
+      "description": "How many threads a listener that does not set its own concurrency runs. Each is dedicated to one listener for the life of the application and holds a long poll open the whole time, so this multiplies the requests parked against EQS by every listener. More than one also gives up handling a queue's messages in the order they arrived.",
+      "defaultValue": 1
+    }
+  ]
+}
