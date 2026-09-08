@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.24](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.23...euclid-spring-boot-starter-v0.1.24) (2026-09-08)
+
+
+### Bug Fixes
+
+* performance issues in ESM and EQS ([220786c](https://github.com/jensvogt/euclid-spring/commit/220786c084a635b0dd8993762fdb5dc8c249f3a0))
+
 ## [0.1.23](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.22...euclid-spring-boot-starter-v0.1.23) (2026-09-06)
 
 
