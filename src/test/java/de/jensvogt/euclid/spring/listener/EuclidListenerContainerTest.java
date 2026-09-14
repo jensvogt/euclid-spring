@@ -14,6 +14,7 @@ import de.jensvogt.euclid.dto.eqs.GetQueueErnResponse;
 import de.jensvogt.euclid.dto.eqs.ReceiveMessagesResponse;
 import de.jensvogt.euclid.dto.eqs.model.Message;
 import de.jensvogt.euclid.exception.EuclidServiceException;
+import de.jensvogt.euclid.module.eap.EuclidEap;
 import de.jensvogt.euclid.module.emo.EuclidEmo;
 import de.jensvogt.euclid.module.esm.EuclidEsm;
 import de.jensvogt.euclid.module.ens.EuclidEns;
@@ -64,6 +65,12 @@ class EuclidListenerContainerTest {
     private EuclidEsm euclidEsm;
     private EuclidEns euclidEns;
     private EuclidEmo euclidEmo;
+
+    /**
+     * The autoscaler's own copy of the load figures goes here rather than through EMO, which
+     * aggregates into five-minute buckets before anything can read them.
+     */
+    private EuclidEap euclidEap;
     private EuclidListenerContainer container;
 
     @BeforeEach
@@ -92,8 +99,10 @@ class EuclidListenerContainerTest {
         ObjectProvider<JsonMapper> objectMapperProvider = mock(ObjectProvider.class);
         when(objectMapperProvider.getIfAvailable(any())).thenReturn(new JsonMapper());
 
+        euclidEap = mock(EuclidEap.class);
+
         container = new EuclidListenerContainer(providerOf(euclidEqs), providerOf(euclidEsm), providerOf(euclidEns), providerOf(euclidEmo),
-                objectMapperProvider);
+                providerOf(euclidEap), objectMapperProvider);
     }
 
     @AfterEach

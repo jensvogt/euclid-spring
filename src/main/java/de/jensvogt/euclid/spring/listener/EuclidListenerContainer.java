@@ -7,6 +7,7 @@ import de.jensvogt.euclid.exception.EuclidServiceException;
 import de.jensvogt.euclid.dto.com.Variant;
 import de.jensvogt.euclid.dto.eqs.model.Queue;
 import de.jensvogt.euclid.dto.emo.Metric;
+import de.jensvogt.euclid.module.eap.EuclidEap;
 import de.jensvogt.euclid.module.emo.EuclidEmo;
 import de.jensvogt.euclid.module.ens.EuclidEns;
 import de.jensvogt.euclid.module.eqs.EuclidEqs;
@@ -115,6 +116,16 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private final ObjectProvider<EuclidEmo> euclidEmoProvider;
 
     /**
+     * The client the autoscaler's own copy of the load figures goes through.
+     *
+     * <p>Separate from {@link #euclidEmoProvider} on purpose. EMO aggregates into five-minute
+     * buckets before anything can read them, which is right for a graph and five minutes too slow
+     * for a control loop - so the same numbers go both ways: to EMO for the history, and to EAP for
+     * the autoscaler, which reads them from the instance record within a reconcile.
+     */
+    private final ObjectProvider<EuclidEap> euclidEapProvider;
+
+    /**
      * Nanoseconds this process has spent inside listener handlers since the last report.
      *
      * <p>Summed across every listener thread, so it exceeds wall-clock time whenever more than one
@@ -193,11 +204,13 @@ public class EuclidListenerContainer implements SmartLifecycle {
                                    ObjectProvider<EuclidEsm> euclidEsmProvider,
                                    ObjectProvider<EuclidEns> euclidEnsProvider,
                                    ObjectProvider<EuclidEmo> euclidEmoProvider,
+                                   ObjectProvider<EuclidEap> euclidEapProvider,
                                    ObjectProvider<JsonMapper> objectMapperProvider) {
         this.euclidSqsProvider = euclidSqsProvider;
         this.euclidEsmProvider = euclidEsmProvider;
         this.euclidEnsProvider = euclidEnsProvider;
         this.euclidEmoProvider = euclidEmoProvider;
+        this.euclidEapProvider = euclidEapProvider;
         this.objectMapperProvider = objectMapperProvider;
     }
 
@@ -564,11 +577,26 @@ public class EuclidListenerContainer implements SmartLifecycle {
                 if (loadReportFailed.compareAndSet(true, false)) {
                     logger.info("Load reporting for instance " + instanceId + " is working again");
                 }
+                double reported = Math.min(100.0, utilisation);
+                double backlog = currentBacklog();
+
+                // To EMO for the history and the dashboards, unchanged.
                 euclidEmo.pushMetrics(applicationId == null ? "application" : applicationId,
                                       List.of(Metric.gauge("application-utilisation", "instance", instanceId,
-                                                           Math.min(100.0, utilisation)),
+                                                           reported),
                                               Metric.gauge("application-backlog", "instance", instanceId,
-                                                           currentBacklog())));
+                                                           backlog)));
+
+                // And to EAP for the autoscaler. The same numbers by a different road, because EMO
+                // holds them in memory until its averaging bucket closes - five minutes, as
+                // shipped - and a pool that reacts five minutes late is a pool that is always
+                // scaling for the load before last. This lands on the instance record the manager
+                // reads on its next reconcile.
+                final EuclidEap euclidEap = euclidEapProvider.getIfAvailable();
+                if (euclidEap != null) {
+                    euclidEap.reportLoad(instanceId, reported, Math.round(backlog),
+                                         applicationId == null ? "" : applicationId);
+                }
 
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();

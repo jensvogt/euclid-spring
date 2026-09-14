@@ -5,6 +5,7 @@ import de.jensvogt.euclid.auth.TokenRefreshable;
 import de.jensvogt.euclid.module.eam.EuclidEam;
 import de.jensvogt.euclid.module.eam.EuclidSession;
 import de.jensvogt.euclid.module.ees.EuclidEes;
+import de.jensvogt.euclid.module.eap.EuclidEap;
 import de.jensvogt.euclid.module.emo.EuclidEmo;
 import de.jensvogt.euclid.module.ens.EuclidEns;
 import de.jensvogt.euclid.module.eqs.EuclidEqs;
@@ -252,8 +253,10 @@ public class EuclidSqsAutoConfiguration {
                                                              ObjectProvider<EuclidEsm> euclidEsmProvider,
                                                              ObjectProvider<EuclidEns> euclidEnsProvider,
                                                            ObjectProvider<EuclidEmo> euclidEmoProvider,
+                                                           ObjectProvider<EuclidEap> euclidEapProvider,
                                                              ObjectProvider<JsonMapper> objectMapperProvider) {
-        return new EuclidListenerContainer(euclidSqsProvider, euclidEsmProvider, euclidEnsProvider, euclidEmoProvider, objectMapperProvider);
+        return new EuclidListenerContainer(euclidSqsProvider, euclidEsmProvider, euclidEnsProvider, euclidEmoProvider,
+                                           euclidEapProvider, objectMapperProvider);
     }
 
     // A bean post processor is instantiated ahead of the ordinary singletons, so a @Bean method
