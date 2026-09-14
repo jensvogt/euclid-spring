@@ -1,5 +1,9 @@
 package de.jensvogt.euclid.spring.listener;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import de.jensvogt.euclid.dto.com.Variant;
 import de.jensvogt.euclid.dto.ees.model.Event;
 import de.jensvogt.euclid.dto.ens.GetTopicErnResponse;
@@ -23,6 +27,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -31,6 +36,8 @@ import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -45,6 +52,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.atMost;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -72,6 +80,10 @@ class EuclidListenerContainerTest {
      */
     private EuclidEap euclidEap;
     private EuclidListenerContainer container;
+
+    private Logger containerLogger;
+    private ListAppender<ILoggingEvent> logAppender;
+    private Level loggerLevelBefore;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -108,6 +120,110 @@ class EuclidListenerContainerTest {
     @AfterEach
     void tearDown() {
         container.stop();
+        releaseContainerLog();
+    }
+
+    /**
+     * The count the autoscaler reads as "do not stop me". It has to come back down however the
+     * handler leaves - a count that only ever rises pins the pool at its ceiling for the life of
+     * the process, and nothing else would say so.
+     */
+    @Test
+    void handlersInFlightAreCountedWhileTheyRunAndNotAfterwards() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        stubReceive(message("{\"name\":\"abc\",\"value\":5}"));
+        BlockingHandler handler = new BlockingHandler(entered, release);
+        container.register(handler, BlockingHandler.class.getMethod("handle", TestPayload.class),
+                "test-queue", 10, 0, true, 1);
+
+        assertEquals(0L, container.activeHandlers());
+        container.start();
+
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+        assertEquals(1L, container.activeHandlers());
+
+        release.countDown();
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals(0L, container.activeHandlers()));
+    }
+
+    /** The finally that decrements has to survive a handler that throws, or the count never falls. */
+    @Test
+    void aHandlerThatFailsStillStopsBeingCounted() throws Exception {
+        stubReceive(message("{\"name\":\"abc\",\"value\":5}"));
+        FailingPayloadHandler handler = new FailingPayloadHandler();
+        container.register(handler, FailingPayloadHandler.class.getMethod("handle", TestPayload.class),
+                "test-queue", 10, 0, true, 1);
+
+        container.start();
+
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> verify(euclidEqs, atLeastOnce())
+                .receiveMessages(anyString(), anyLong(), anyLong()));
+        await().pollDelay(Duration.ofMillis(200)).atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertEquals(0L, container.activeHandlers()));
+    }
+
+    /** A handler that waits to be let go, so the count can be read while one is in flight. */
+    private static class BlockingHandler {
+
+        private final CountDownLatch entered;
+        private final CountDownLatch release;
+
+        private BlockingHandler(CountDownLatch entered, CountDownLatch release) {
+            this.entered = entered;
+            this.release = release;
+        }
+
+        public void handle(TestPayload payload) {
+            entered.countDown();
+            try {
+                if (!release.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Handler was never released");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /**
+     * A handler abandoned by stop() is the shutdown working, not the handler failing - and there is
+     * one of these per message in flight, so reported as errors they are the loudest thing in the
+     * log of a clean shutdown. What the container sees is what EuclidCalls leaves behind: the
+     * interrupt flag re-set, and the InterruptedException wrapped in something of the caller's own.
+     */
+    @Test
+    void aMessageAbandonedDuringShutdownIsNotReportedAsAFailure() throws Exception {
+        ListAppender<ILoggingEvent> log = captureContainerLog();
+        stubReceive(message("{\"name\":\"abc\",\"value\":5}"));
+        InterruptingHandler handler = new InterruptingHandler();
+        container.register(handler, InterruptingHandler.class.getMethod("handle", TestPayload.class),
+                "test-queue", 10, 0, true, 1);
+
+        container.start();
+
+        await().atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertTrue(loggedAt(log, Level.INFO, "abandoned message")));
+        assertFalse(loggedAt(log, Level.ERROR, "failed to handle message"));
+        // Not deleted, so the lease expires and somebody else gets it - which is what makes
+        // abandoning it safe in the first place.
+        verify(euclidEqs, never()).deleteMessage(anyString());
+    }
+
+    /** The other half of the branch above: a handler that fails on its own is still an error. */
+    @Test
+    void aHandlerThatFailsOnItsOwnIsStillReportedAsAFailure() throws Exception {
+        ListAppender<ILoggingEvent> log = captureContainerLog();
+        stubReceive(message("{\"name\":\"abc\",\"value\":5}"));
+        FailingPayloadHandler handler = new FailingPayloadHandler();
+        container.register(handler, FailingPayloadHandler.class.getMethod("handle", TestPayload.class),
+                "test-queue", 10, 0, true, 1);
+
+        container.start();
+
+        await().atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertTrue(loggedAt(log, Level.ERROR, "failed to handle message")));
+        verify(euclidEqs, never()).deleteMessage(anyString());
     }
 
     @Test
@@ -418,6 +534,35 @@ class EuclidListenerContainerTest {
                 10, 0, 300, true, 1);
     }
 
+    /**
+     * Collects what the container logs, at DEBUG so that the level a message was logged at is
+     * something the test can see rather than something the configuration has already decided.
+     */
+    private ListAppender<ILoggingEvent> captureContainerLog() {
+        containerLogger = (Logger) LoggerFactory.getLogger(EuclidListenerContainer.class);
+        loggerLevelBefore = containerLogger.getLevel();
+        containerLogger.setLevel(Level.DEBUG);
+
+        logAppender = new ListAppender<>();
+        logAppender.start();
+        containerLogger.addAppender(logAppender);
+        return logAppender;
+    }
+
+    private void releaseContainerLog() {
+        if (containerLogger == null) {
+            return;
+        }
+        containerLogger.detachAppender(logAppender);
+        containerLogger.setLevel(loggerLevelBefore);
+        containerLogger = null;
+    }
+
+    private static boolean loggedAt(ListAppender<ILoggingEvent> log, Level level, String contains) {
+        return log.list.stream()
+                .anyMatch(event -> event.getLevel() == level && event.getFormattedMessage().contains(contains));
+    }
+
     private void stubReceive(Message message) throws Exception {
         when(euclidEqs.receiveMessages(anyString(), anyLong(), anyLong()))
                 .thenReturn(ReceiveMessagesResponse.builder().messages(List.of(message)).total(1).build())
@@ -459,6 +604,25 @@ class EuclidListenerContainerTest {
 
         public void handle(TestPayload payload) {
             this.received = payload;
+        }
+    }
+
+    /** A handler caught by stop(), as it looks by the time the container sees it. */
+    private static class InterruptingHandler {
+
+        public void handle(TestPayload payload) {
+            // The order EuclidCalls leaves things in: flag re-set, InterruptedException wrapped.
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while trying to list objects",
+                    new InterruptedException());
+        }
+    }
+
+    /** A handler that fails for a reason of its own, with nothing interrupted. */
+    private static class FailingPayloadHandler {
+
+        public void handle(TestPayload payload) {
+            throw new IllegalStateException("Could not parse it");
         }
     }
 

@@ -135,6 +135,23 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private final AtomicLong busyNanos = new AtomicLong();
 
     /**
+     * Handlers running right now: incremented when one is entered and decremented when it returns,
+     * however it returns.
+     *
+     * <p>Reported to EAP alongside the load, where it means "do not stop me". Utilisation cannot
+     * say that: it is an average over the last window, so an instance that picked up a long message
+     * two seconds ago reports almost nothing and reads as idle - and scale-down stops exactly the
+     * instance that is part-way through something. The work in flight is then abandoned, comes back
+     * when its lease expires, and is done again by whoever is running next, which is the cycle this
+     * number exists to break.
+     *
+     * <p>Distinct from {@link #busyNanos} on purpose. That one is how much work was done and is
+     * reset every window; this one is how much is underway and is a gauge - what it says now is the
+     * whole answer.
+     */
+    private final AtomicLong activeHandlers = new AtomicLong();
+
+    /**
      * Whether the last attempt to report load failed, so the first failure of a run can be logged
      * loudly and the ones after it quietly.
      */
@@ -593,8 +610,13 @@ public class EuclidListenerContainer implements SmartLifecycle {
                 // scaling for the load before last. This lands on the instance record the manager
                 // reads on its next reconcile.
                 final EuclidEap euclidEap = euclidEapProvider.getIfAvailable();
+                // The handler count goes with them, and is the one figure of the three that is read
+                // as an instruction rather than as a measurement: scale-down passes over an
+                // instance reporting any. Utilisation cannot stand in for it - it is an average
+                // over the window just ended, so an instance that picked up a long message a moment
+                // ago reports next to nothing and reads as the idlest one in the pool.
                 if (euclidEap != null) {
-                    euclidEap.reportLoad(instanceId, reported, Math.round(backlog),
+                    euclidEap.reportLoad(instanceId, reported, Math.round(backlog), activeHandlers.get(),
                                          applicationId == null ? "" : applicationId);
                 }
 
@@ -764,6 +786,20 @@ public class EuclidListenerContainer implements SmartLifecycle {
     }
 
     /**
+     * Handlers running in this process right now - what the load report sends as {@code active},
+     * and what keeps the autoscaler from stopping an instance part-way through a message.
+     *
+     * <p>Public because it is the one number here that is worth asking for from outside: a health
+     * endpoint reporting it answers "what is this instance still doing" during a drain, which is
+     * otherwise only visible in the autoscaler's own decision.
+     *
+     * @return handlers started and not yet returned
+     */
+    public long activeHandlers() {
+        return activeHandlers.get();
+    }
+
+    /**
      * Resolves the clients the registered listeners need, and only those: an application whose
      * listeners are all {@code @QueueListener} never asks for an ENS or ESM client, so it never
      * needs those beans to exist. Called from {@link #start()} after the early return, so a
@@ -862,15 +898,37 @@ public class EuclidListenerContainer implements SmartLifecycle {
             // a long poll waiting for work is the opposite of being busy, and counting it would
             // make an idle listener look fully loaded.
             long startedAt = System.nanoTime();
+            activeHandlers.incrementAndGet();
             try {
                 method.invoke(registration.bean(), arg);
             } finally {
+                activeHandlers.decrementAndGet();
                 busyNanos.addAndGet(System.nanoTime() - startedAt);
             }
             if (registration.autoDelete()) {
                 euclidSqs.deleteMessage(message.receiptHandle());
             }
         } catch (Exception e) {
+            // A handler abandoned while this container is stopping is not a fault to report, for
+            // the same reason a poll that fails then is not. stop() interrupts whatever is running
+            // rather than waiting for it - a deliberate decision, see the comment there - so the
+            // interrupt is the shutdown working, not the handler failing. Nothing is lost either:
+            // a message is deleted only after its handler returns, so one abandoned here keeps its
+            // lease, becomes visible again when that expires, and goes to whoever runs next.
+            //
+            // Reported as an error it reads as though parsing had broken, and there is one per
+            // message in flight - which at any concurrency makes a clean shutdown the loudest thing
+            // in the log.
+            if (!running.get() || Thread.currentThread().isInterrupted()) {
+                // Info rather than debug, and deliberately not silent: this process cannot tell a
+                // deploy from an autoscaler scaling it down, and under a pool that ramps it is the
+                // second one - repeatedly, on work that was half done. How often that happens is
+                // worth seeing. Without the stack trace, which says only that the interrupt landed
+                // wherever the handler happened to be.
+                logger.info("Listener for " + registration.describe() + " abandoned message "
+                        + message.ern() + " while stopping, it will be redelivered");
+                return;
+            }
             logger.error("Listener for " + registration.describe() + " failed to handle message "
                     + message.ern(), e);
         }
