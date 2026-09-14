@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.32](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.31...euclid-spring-boot-starter-v0.1.32) (2026-09-14)
+
+
+### Bug Fixes
+
+* bump to euclid JDK 0.1.37, shorten EAP ramp up time ([01df134](https://github.com/jensvogt/euclid-spring/commit/01df134f1ef3d1bee01e0c4d7c75a336012f9d17))
+
 ## [0.1.31](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.30...euclid-spring-boot-starter-v0.1.31) (2026-09-14)
 
 
