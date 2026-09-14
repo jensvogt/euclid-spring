@@ -104,7 +104,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
      * would have applied.
      */
     private static final long DEFAULT_VISIBILITY_SECONDS = 30;
-    private static final String DEFAULT_PRIORITY = "MIDDLE";
+    private static final String DEFAULT_PRIORITY = "MEDIUM";
 
 
     private final ObjectProvider<EuclidEqs> euclidSqsProvider;

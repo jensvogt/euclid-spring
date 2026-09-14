@@ -203,7 +203,7 @@ class EuclidListenerContainerTest {
         container.start();
 
         ArgumentCaptor<String> queueName = ArgumentCaptor.forClass(String.class);
-        verify(euclidEqs, timeout(1000)).createQueue(queueName.capture(), eq(300L), anyLong(), anyLong(), eq(""), anyLong(), eq("MIDDLE"), eq(true));
+        verify(euclidEqs, timeout(1000)).createQueue(queueName.capture(), eq(300L), anyLong(), anyLong(), eq(""), anyLong(), eq("MEDIUM"), eq(true));
         // The run id keeps this run's queue apart from one another run of the same listener owns.
         assertTrue(queueName.getValue().startsWith("invoice-import-"), queueName.getValue());
         verify(euclidEsm, timeout(1000)).subscribe("bucket-ern", "SQS", "delivery-ern", OBJECT_EVENTS, "reports/",
@@ -356,7 +356,7 @@ class EuclidListenerContainerTest {
         // Internal: a topic listener's delivery queue is plumbing behind the subscription, and
         // listing it invites somebody to act on a queue that is not theirs to act on.
         verify(euclidEqs, timeout(1000)).createQueue(eq("orders-app"), anyLong(), anyLong(), anyLong(), eq(""),
-                anyLong(), eq("MIDDLE"), eq(true));
+                anyLong(), eq("MEDIUM"), eq(true));
         verify(euclidEns, timeout(1000)).subscribe("topic-ern", "orders-app-ern");
         verify(euclidEqs, timeout(1000).atLeastOnce()).receiveMessages("orders-app-ern", 10, 0);
     }
@@ -436,7 +436,7 @@ class EuclidListenerContainerTest {
      */
     private Queue queue(String name, String ern, Instant heartbeat) {
         return new Queue(name, "owner", ern, Map.of("euclid.listener.heartbeat", heartbeat.toString()), 0, 0, 0, 0, 0,
-                30, 1024, 3, "", "MIDDLE", Instant.now().toString(), Instant.now().toString());
+                30, 1024, 3, "", "MEDIUM", Instant.now().toString(), Instant.now().toString());
     }
 
     private record TestPayload(String name, int value) {
