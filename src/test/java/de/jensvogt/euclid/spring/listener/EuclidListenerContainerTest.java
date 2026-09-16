@@ -32,6 +32,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.time.Duration;
+import java.io.IOException;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
@@ -54,6 +55,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.atMost;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
@@ -405,6 +407,64 @@ class EuclidListenerContainerTest {
         // deletes nothing - and, worse, treats every subscription as orphaned because no queue
         // survived to keep it.
         verify(euclidEqs, timeout(1000)).listQueues(anyString(), anyLong(), anyLong(), anyString(), anyString(), eq(true));
+    }
+
+    /**
+     * One queue that cannot be deleted must not stop the sweep.
+     *
+     * <p>The delete used to be inside the try that wraps the whole sweep, so a single failure -
+     * the permission missing, somebody deleting it underneath us, a busy server - abandoned the
+     * remaining queues and the subscription cleanup with them. Nothing was ever swept again and
+     * the debris only grew: 62 abandoned queues holding 11,946 messages on one development
+     * installation, the oldest three days old.
+     */
+    @Test
+    void oneQueueThatWillNotDeleteDoesNotStopTheSweep() throws Exception {
+        String firstErn = queueErnOf("invoice-import-first");
+        String secondErn = queueErnOf("invoice-import-second");
+        when(euclidEqs.listQueues(anyString(), anyLong(), anyLong(), anyString(), anyString(), anyBoolean())).thenReturn(
+                ListQueueResponse.builder().queues(List.of(
+                        queue("invoice-import-first", firstErn, Instant.now().minusSeconds(3600)),
+                        queue("invoice-import-second", secondErn, Instant.now().minusSeconds(3600)))).total(2).build());
+        doThrow(new IOException("eqs:delete-queue refused")).when(euclidEqs).deleteQueue(firstErn);
+        stubReceive(message(BUCKET_EVENT_BODY));
+        EventHandler handler = new EventHandler();
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false);
+
+        container.start();
+
+        // The one after the failure is still swept, which is the whole point.
+        verify(euclidEqs, timeout(1000)).deleteQueue(secondErn);
+    }
+
+    /**
+     * A queue that could not be deleted keeps its subscription.
+     *
+     * <p>Removing the subscription of a queue that still exists is the worst of the three outcomes:
+     * the queue is then fed by nothing and drained by nothing, so its messages sit there for ever
+     * and still count toward the backlog the autoscaler reads - which is how a pool ends up
+     * starting an instance every minute for work nobody will ever do.
+     */
+    @Test
+    void aQueueThatCouldNotBeDeletedKeepsItsSubscription() throws Exception {
+        String stubbornErn = queueErnOf("invoice-import-stubborn");
+        when(euclidEqs.listQueues(anyString(), anyLong(), anyLong(), anyString(), anyString(), anyBoolean())).thenReturn(
+                ListQueueResponse.builder().queues(List.of(
+                        queue("invoice-import-stubborn", stubbornErn, Instant.now().minusSeconds(3600)))).total(1).build());
+        when(euclidEsm.listSubscriptions("bucket-ern")).thenReturn(
+                de.jensvogt.euclid.dto.esm.ListSubscriptionsResponse.builder().subscriptions(List.of(
+                        esmSubscription("sub-stubborn", stubbornErn))).total(1).build());
+        doThrow(new IOException("eqs:delete-queue refused")).when(euclidEqs).deleteQueue(stubbornErn);
+        stubReceive(message(BUCKET_EVENT_BODY));
+        EventHandler handler = new EventHandler();
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false);
+
+        container.start();
+
+        verify(euclidEqs, timeout(1000)).deleteQueue(stubbornErn);
+        // Both survive, so the next run can try again. Leaving the queue without its subscription
+        // is the state that cannot repair itself.
+        verify(euclidEsm, never()).unsubscribe("sub-stubborn");
     }
 
     /**

@@ -407,9 +407,28 @@ public class EuclidListenerContainer implements SmartLifecycle {
                     }
                     continue;
                 }
-                euclidSqs.deleteQueue(queue.ern());
-                logger.info("Deleted queue '" + queue.name() + "', left behind by an earlier run of "
-                        + registration.describe());
+                // Caught per queue, not once around the whole sweep. One queue that cannot be
+                // deleted - the permission was missing, somebody deleted it underneath us, the
+                // server was busy - used to abort the loop and take the subscription cleanup below
+                // with it, so nothing was ever swept again and the debris only grew. Observed on a
+                // development installation as 62 abandoned queues holding 11,946 messages, the
+                // oldest three days old, several of them already unsubscribed - which is the state
+                // this shape produces and no other.
+                try {
+                    euclidSqs.deleteQueue(queue.ern());
+                    logger.info("Deleted queue '" + queue.name() + "', left behind by an earlier run of "
+                            + registration.describe());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                } catch (Exception e) {
+                    // Kept, so the subscription that feeds it is kept too: a subscription removed
+                    // while its queue survives leaves a queue nothing drains and nothing fills,
+                    // which is worse than leaving both and trying again next time.
+                    keptQueueErns.add(queue.ern());
+                    logger.warn("Could not delete queue '" + queue.name() + "' left behind by "
+                            + registration.describe() + ", leaving it and its subscription in place", e);
+                }
             }
             sweepOrphanedSubscriptions(registration, bucketErn, queuePrefix, keptQueueErns);
         } catch (Exception e) {
