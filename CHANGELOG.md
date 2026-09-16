@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.34](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.33...euclid-spring-boot-starter-v0.1.34) (2026-09-16)
+
+
+### Bug Fixes
+
+* orphan queues removal ([8e989b6](https://github.com/jensvogt/euclid-spring/commit/8e989b6bb366e1ef4540d1e3f7cef8cf90987823))
+
 ## [0.1.33](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.32...euclid-spring-boot-starter-v0.1.33) (2026-09-14)
 
 
