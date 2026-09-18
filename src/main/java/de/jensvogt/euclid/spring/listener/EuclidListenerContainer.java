@@ -30,16 +30,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -276,10 +273,10 @@ public class EuclidListenerContainer implements SmartLifecycle {
      */
     public void registerBucket(Object bean, Method method, String queueName, String bucketName, String prefix,
                                boolean directories, List<String> eventTypes, long maxMessages, long waitTime,
-                               long visibilityTimeout, boolean autoDelete, int concurrency) {
+                               long visibilityTimeout, boolean autoDelete, int concurrency, boolean shared) {
         method.setAccessible(true);
         bucketRegistrations.add(new BucketRegistration(bean, method, queueName, bucketName, prefix, directories,
-                eventTypes, maxMessages, waitTime, visibilityTimeout, autoDelete, concurrency));
+                eventTypes, maxMessages, waitTime, visibilityTimeout, autoDelete, concurrency, shared));
     }
 
     /**
@@ -384,6 +381,12 @@ public class EuclidListenerContainer implements SmartLifecycle {
      * @return the ERN of the queue to receive from
      */
     private String openBucketDelivery(BucketRegistration registration, String bucketErn) throws Exception {
+
+        // One queue for the listener, competed for by every instance - see BucketListener#shared.
+        // Nothing here is per run, which is the point: the queue is found by name on the next
+        // start, so it outlives the run and keeps what arrived while nothing was listening.
+        if (registration.shared()) return openSharedBucketDelivery(registration, bucketErn);
+
         String queueName = registration.queueName() + "-" + runId;
 
         // The visibility timeout is the queue's, not the message's: it is what gives a handler
@@ -400,6 +403,42 @@ public class EuclidListenerContainer implements SmartLifecycle {
         scheduleHeartbeat(queueErn);
 
         logger.info("Listening for " + registration.describe() + " on queue '" + queueName + "'");
+        return queueErn;
+    }
+
+    /**
+     * Opens the one queue every instance of this listener shares.
+     *
+     * <p>Nothing here is per run. The queue is named after the listener alone, found again by name
+     * on the next start, and subscribed to the bucket once - so instances compete for what arrives
+     * rather than each getting a copy, and what arrives while nothing is running is still there
+     * when something is.
+     *
+     * <p>No heartbeat, and nothing here for the sweep to find. The heartbeat exists to tell "this
+     * queue's owner crashed" from "its owner is running", a question a queue with no single owner
+     * does not raise. The sweep still runs before this - it is how the per-run queues of an earlier
+     * arrangement get cleared away - but it lists the prefix {@code <queueName>-} and this queue is
+     * {@code <queueName>} exactly, so it is out of reach by construction rather than by a check
+     * somebody has to remember.
+     *
+     * <p>Creating and subscribing are both safe to race. {@code createQueue} on an existing name
+     * returns the queue that is there, and ESM keys a subscription on source, type and target - so
+     * sixteen instances starting together end with one queue and one subscription between them.
+     */
+    private String openSharedBucketDelivery(BucketRegistration registration, String bucketErn) throws Exception {
+
+        String queueName = registration.queueName();
+
+        String queueErn = euclidSqs.createQueue(queueName, registration.visibilityTimeout(), DEFAULT_MAX_RETRIES,
+                DEFAULT_MAX_MESSAGE_LENGTH, queueName + DLQ_SUFFIX, 0, DEFAULT_PRIORITY, true).ern();
+
+        euclidEsm.subscribe(bucketErn, "SQS", queueErn, registration.eventTypes(),
+                registration.prefix(), registration.directories());
+
+        // Deliberately not recorded in bucketDeliveries: that map is what closeBucketDeliveries()
+        // tears down on shutdown, and tearing this one down would take the queue out from under
+        // every other instance still reading it - and with it everything waiting in it.
+        logger.info("Listening for " + registration.describe() + " on shared queue '" + queueName + "'");
         return queueErn;
     }
 
@@ -696,15 +735,6 @@ public class EuclidListenerContainer implements SmartLifecycle {
     }
 
     /**
-     * How many messages are waiting across the queues this process polls.
-     *
-     * <p>Best effort: a queue that cannot be counted contributes nothing rather than failing the
-     * whole report, since a backlog that is missing one queue is still far more useful than no
-     * backlog at all.
-     *
-     * @return the total available message count
-     */
-    /**
      * The backlog to report on this tick: freshly counted every {@link #BACKLOG_EVERY_N_TICKS},
      * and the previous reading in between.
      *
@@ -717,6 +747,15 @@ public class EuclidListenerContainer implements SmartLifecycle {
         return lastBacklog.get();
     }
 
+    /**
+     * How many messages are waiting across the queues this process polls.
+     *
+     * <p>Best effort: a queue that cannot be counted contributes nothing rather than failing the
+     * whole report, since a backlog that is missing one queue is still far more useful than no
+     * backlog at all.
+     *
+     * @return the total available message count
+     */
     private double backlog() {
         long total = 0;
         for (String ern : polledQueueErns) {
@@ -1104,7 +1143,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
 
     private record BucketRegistration(Object bean, Method method, String queueName, String bucketName, String prefix,
                                       boolean directories, List<String> eventTypes, long maxMessages, long waitTime,
-                                      long visibilityTimeout, boolean autoDelete, int concurrency)
+                                      long visibilityTimeout, boolean autoDelete, int concurrency, boolean shared)
             implements MessageRegistration {
 
         @Override

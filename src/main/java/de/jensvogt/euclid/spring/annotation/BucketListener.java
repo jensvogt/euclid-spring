@@ -17,12 +17,15 @@ import java.lang.annotation.Target;
  * wake-up included. The filters ride on the subscription and the server applies them as it
  * publishes, so only matching events are ever put in the queue.
  *
- * <p>The queue belongs to one run of the application: it is created at startup, and deleted along
- * with its subscription when the context closes. A queue left behind by a run that was killed
- * before it could do that is deleted by the next run's sweep, once its owner has stopped saying it
- * is alive. Two consequences follow. Events published while no instance is running are not kept -
- * there is no queue to keep them in - and every running instance has its own queue, so each
- * receives every event rather than the instances sharing the work between them.
+ * <p>By default the queue belongs to one run of the application: it is created at startup, and
+ * deleted along with its subscription when the context closes. A queue left behind by a run that
+ * was killed before it could do that is deleted by the next run's sweep, once its owner has stopped
+ * saying it is alive. Two consequences follow. Events published while no instance is running are
+ * not kept - there is no queue to keep them in - and every running instance has its own queue, so
+ * each receives every event rather than the instances sharing the work between them.
+ *
+ * <p>Set {@link #shared()} to divide the work instead: one queue for the listener, competed for by
+ * every instance. See there - it is the right setting for anything scaled for throughput.
  *
  * <p>Supported method signatures: {@code (Event event)} (the full envelope, including event type,
  * event id, delivery attempts and the raw payload map), {@code (Map<String, Object> payload)}, or
@@ -64,6 +67,31 @@ public @interface BucketListener {
      * is called and, with it, which queues a sweep recognises as this listener's.
      */
     String queue() default "";
+
+    /**
+     * Whether every instance of this application shares one delivery queue.
+     *
+     * <p>False, the default, gives each run its own queue subscribed to the bucket - so every
+     * instance receives every event. That is broadcast, and it is what a listener wants when each
+     * instance has to act on each event: invalidating a cache it holds, reloading a file it keeps
+     * open.
+     *
+     * <p>True gives the listener one queue with a stable name, shared by every instance, and
+     * subscribed once. Instances then compete for events and the work is divided between them,
+     * which is what a listener wants when handling an event is the work - parsing a file, storing a
+     * record. Two further consequences follow, both improvements: events published while no
+     * instance is running are kept, because the queue outlives the run; and the queue is not
+     * deleted on shutdown, because other instances may still be reading it.
+     *
+     * <p>Set this on any listener you scale for throughput. Left false, adding instances multiplies
+     * the work rather than dividing it: sixteen instances each parse the same file. Worse, the
+     * per-run arrangement has a race under a pool that starts several instances at once - each new
+     * run sweeps the subscriptions of queues it did not see when it listed them a moment earlier,
+     * so siblings that subscribed in between are unsubscribed, and the last one to start ends up
+     * the only one receiving anything. Observed on a parsing pool: seventeen delivery queues, one
+     * subscription, 423,444 events waiting in it and fifteen instances polling queues nothing fed.
+     */
+    boolean shared() default false;
 
     /**
      * Max number of events fetched per poll.

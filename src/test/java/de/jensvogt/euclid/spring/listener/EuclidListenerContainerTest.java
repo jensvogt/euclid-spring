@@ -4,7 +4,6 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import de.jensvogt.euclid.dto.com.Variant;
 import de.jensvogt.euclid.dto.ees.model.Event;
 import de.jensvogt.euclid.dto.ens.GetTopicErnResponse;
 import de.jensvogt.euclid.dto.ens.ListSubscriptionsResponse;
@@ -317,7 +316,7 @@ class EuclidListenerContainerTest {
         container.start();
 
         await().pollDelay(Duration.ofMillis(300)).atMost(Duration.ofSeconds(2))
-                .untilAsserted(() -> assertFalse(handler.received != null));
+                .untilAsserted(() -> assertNull(handler.received));
         verify(euclidEqs, never()).deleteMessage(anyString());
     }
 
@@ -425,7 +424,51 @@ class EuclidListenerContainerTest {
      * remaining queues and the subscription cleanup with them. Nothing was ever swept again and
      * the debris only grew: 62 abandoned queues holding 11,946 messages on one development
      * installation, the oldest three days old.
+     * <p>
+     * A shared listener divides the work; the default multiplies it.
+     *
+     * <p>Sixteen instances of a run-scoped listener each parse the same file. Worse, the per-run
+     * arrangement races under a pool that starts several at once - each new run sweeps the
+     * subscriptions of queues it did not see when it listed them a moment before, so siblings that
+     * subscribed in between are unsubscribed and the last to start ends up the only one receiving.
+     * Observed on a parsing pool: seventeen delivery queues, one subscription, 423,444 events
+     * waiting in it, fifteen instances polling queues nothing fed.
      */
+    @Test
+    void aSharedBucketListenerUsesOneQueueNamedAfterTheListener() throws Exception {
+        stubReceive(message(BUCKET_EVENT_BODY));
+        EventHandler handler = new EventHandler();
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false, true);
+
+        container.start();
+
+        // The listener's name exactly - no run id, so every instance resolves the same queue and
+        // the next run finds what this one left in it.
+        verify(euclidEqs, timeout(1000)).createQueue(eq("invoice-import"), anyLong(), anyLong(), anyLong(),
+                eq("invoice-import-dlqueue"), anyLong(), anyString(), anyBoolean());
+        verify(euclidEsm, timeout(1000)).subscribe(eq("bucket-ern"), eq("SQS"), eq("delivery-ern"), any(), eq(""),
+                eq(false));
+    }
+
+    @Test
+    void aSharedQueueIsNotTornDownWhenOneInstanceStops() throws Exception {
+        stubReceive(message(BUCKET_EVENT_BODY));
+        EventHandler handler = new EventHandler();
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false, true);
+
+        container.start();
+        verify(euclidEqs, timeout(1000)).createQueue(eq("invoice-import"), anyLong(), anyLong(), anyLong(),
+                anyString(), anyLong(), anyString(), anyBoolean());
+
+        container.stop();
+
+        // Other instances are still reading it, and what is waiting in it is theirs to handle. The
+        // run-scoped queue is deleted on the way out precisely because nothing else can be reading
+        // it; this one must not be.
+        verify(euclidEqs, never()).deleteQueue("delivery-ern");
+        verify(euclidEsm, never()).unsubscribe(anyString());
+    }
+
     /**
      * The dead letter queue shares the listener's queue prefix and never carries a heartbeat, so a
      * sweep judging it by age would delete it within minutes - throwing away exactly the failures
@@ -624,8 +667,13 @@ class EuclidListenerContainerTest {
 
     private void registerBucket(Object bean, java.lang.reflect.Method method, String bucket, String prefix,
                                 boolean directories) {
+        registerBucket(bean, method, bucket, prefix, directories, false);
+    }
+
+    private void registerBucket(Object bean, java.lang.reflect.Method method, String bucket, String prefix,
+                                boolean directories, boolean shared) {
         container.registerBucket(bean, method, "invoice-import", bucket, prefix, directories, OBJECT_EVENTS,
-                10, 0, 300, true, 1);
+                10, 0, 300, true, 1, shared);
     }
 
     /**
@@ -749,13 +797,6 @@ class EuclidListenerContainerTest {
 
         public void handle(ObjectSummary object) {
             this.received = object;
-        }
-    }
-
-    private static class FailingHandler {
-
-        public void handle(Event event) {
-            throw new IllegalStateException("handler failed for " + event.eventId());
         }
     }
 }
