@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.39](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.38...euclid-spring-boot-starter-v0.1.39) (2026-09-18)
+
+
+### Bug Fixes
+
+* EAP bean added ([7ae223a](https://github.com/jensvogt/euclid-spring/commit/7ae223acd2cd6264f70c376f04259612e1b45c1d))
+
 ## [0.1.38](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.37...euclid-spring-boot-starter-v0.1.38) (2026-09-18)
 
 
