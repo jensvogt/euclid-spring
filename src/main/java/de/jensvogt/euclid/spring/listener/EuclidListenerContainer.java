@@ -95,8 +95,14 @@ public class EuclidListenerContainer implements SmartLifecycle {
      * check that would move it is skipped entirely: a poison message is redelivered for ever. Seen
      * on a parsing queue as a message with {@code receivedCount} of 19 against a
      * {@code maxReceiveCount} of 3.
+     *
+     * <p>Spelled {@code -dlqueue} rather than {@code -dlq} to match what applications on this
+     * installation already name theirs - {@code ftp-file-distribution-onix-queue} beside
+     * {@code ftp-file-distribution-onix-dlqueue}, and eight more pairs like it. A framework that
+     * invents its own spelling for a thing the applications around it already name consistently
+     * makes every listing need reading twice.
      */
-    private static final String DLQ_SUFFIX = "-dlq";
+    private static final String DLQ_SUFFIX = "-dlqueue";
 
     /** The status EQS refuses a receive on a stopped queue with. */
     private static final int HTTP_CONFLICT = 409;

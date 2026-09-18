@@ -340,7 +340,7 @@ class EuclidListenerContainerTest {
         // and without one at all EQS has nowhere to put a message that keeps failing, so it hands
         // it back for ever. A poison event was seen redelivered nineteen times against a limit of
         // three, for want of this argument.
-        assertEquals("invoice-import-dlq", dlqName.getValue());
+        assertEquals("invoice-import-dlqueue", dlqName.getValue());
         verify(euclidEsm, timeout(1000)).subscribe("bucket-ern", "SQS", "delivery-ern", OBJECT_EVENTS, "reports/",
                 false);
         verify(euclidEqs, timeout(1000).atLeastOnce()).receiveMessages("delivery-ern", 10, 0);
@@ -433,12 +433,12 @@ class EuclidListenerContainerTest {
      */
     @Test
     void theDeadLetterQueueIsNotSweptAwayWithTheRunThatFailed() throws Exception {
-        String dlqErn = queueErnOf("invoice-import-dlq");
+        String dlqErn = queueErnOf("invoice-import-dlqueue");
         when(euclidEqs.listQueues(anyString(), anyLong(), anyLong(), anyString(), anyString(), anyBoolean())).thenReturn(
                 ListQueueResponse.builder().queues(List.of(
                         // Old enough to look abandoned, and with no heartbeat - which is what a
                         // dead letter queue always looks like, since nothing beats for it.
-                        queue("invoice-import-dlq", dlqErn, Instant.now().minusSeconds(3600)),
+                        queue("invoice-import-dlqueue", dlqErn, Instant.now().minusSeconds(3600)),
                         queue("invoice-import-dead", queueErnOf("invoice-import-dead"), Instant.now().minusSeconds(3600)))).total(2).build());
         stubReceive(message(BUCKET_EVENT_BODY));
         EventHandler handler = new EventHandler();
@@ -575,7 +575,7 @@ class EuclidListenerContainerTest {
         // Internal: a topic listener's delivery queue is plumbing behind the subscription, and
         // listing it invites somebody to act on a queue that is not theirs to act on.
         verify(euclidEqs, timeout(1000)).createQueue(eq("orders-app"), anyLong(), anyLong(), anyLong(),
-                eq("orders-app-dlq"), anyLong(), eq("MEDIUM"), eq(true));
+                eq("orders-app-dlqueue"), anyLong(), eq("MEDIUM"), eq(true));
         verify(euclidEns, timeout(1000)).subscribe("topic-ern", "orders-app-ern");
         verify(euclidEqs, timeout(1000).atLeastOnce()).receiveMessages("orders-app-ern", 10, 0);
     }
