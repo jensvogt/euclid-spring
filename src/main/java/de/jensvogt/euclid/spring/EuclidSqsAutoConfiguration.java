@@ -247,6 +247,28 @@ public class EuclidSqsAutoConfiguration {
         return refreshing(euclidSession.emo(), credentialsFile);
     }
 
+    /**
+     * The application module, which the listener container reports this instance's load to.
+     *
+     * <p>Easy to think unnecessary - nothing in an application calls EAP the way it calls EQS or
+     * ESM - and its absence is why this was missing. But {@code EuclidListenerContainer} asks for
+     * one to report utilisation, backlog and its live handler count to, and asks through an
+     * {@code ObjectProvider}: with no bean to hand it, the report was skipped by a null check, no
+     * exception was thrown and nothing was logged. Every application reported to EMO on the same
+     * tick and to the autoscaler never, which looks from the outside exactly like load reporting
+     * that does not exist.
+     *
+     * <p>What that cost: the manager fell back to EMO's five-minute buckets for every scaling
+     * decision, and - worse - never learned the handler count, which is the figure that stops it
+     * scaling down an instance in the middle of a message. Instances were stopped mid-parse, their
+     * JDBC sockets closed by the interrupt, and the messages they were working on redelivered.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public EuclidEap euclidEap(EuclidSession euclidSession, ObjectProvider<CredentialsFileTokens> credentialsFile) {
+        return refreshing(euclidSession.eap(), credentialsFile);
+    }
+
     @Bean
     @ConditionalOnMissingBean
     public EuclidListenerContainer euclidListenerContainer(ObjectProvider<EuclidEqs> euclidSqsProvider,
