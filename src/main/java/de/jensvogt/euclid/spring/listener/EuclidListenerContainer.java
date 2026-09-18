@@ -83,6 +83,21 @@ public class EuclidListenerContainer implements SmartLifecycle {
     /** How many queues one sweep looks at - far more than an application has listeners. */
     private static final long SWEEP_PAGE_SIZE = 200;
 
+    /**
+     * Suffix of the dead letter queue a listener's queue redrives into.
+     *
+     * <p>Deliberately without the run id that a bucket listener's own queue carries. A dead letter
+     * queue that belonged to one run would be swept away with it, taking the failures it exists to
+     * preserve - and the run that produced them is exactly the one that is no longer there to ask.
+     * One per listener, outliving every run of it.
+     *
+     * <p>Without a dead letter queue EQS has nowhere to put a message that keeps failing, and the
+     * check that would move it is skipped entirely: a poison message is redelivered for ever. Seen
+     * on a parsing queue as a message with {@code receivedCount} of 19 against a
+     * {@code maxReceiveCount} of 3.
+     */
+    private static final String DLQ_SUFFIX = "-dlq";
+
     /** The status EQS refuses a receive on a stopped queue with. */
     private static final int HTTP_CONFLICT = 409;
 
@@ -366,9 +381,11 @@ public class EuclidListenerContainer implements SmartLifecycle {
         String queueName = registration.queueName() + "-" + runId;
 
         // The visibility timeout is the queue's, not the message's: it is what gives a handler
-        // that dies mid-work its event back rather than losing it.
+        // that dies mid-work its event back rather than losing it. The dead letter queue is where
+        // it stops getting it back: after DEFAULT_MAX_RETRIES deliveries the message is moved
+        // there instead of being handed to the handler that has already failed on it.
         String queueErn = euclidSqs.createQueue(queueName, registration.visibilityTimeout(), DEFAULT_MAX_RETRIES,
-                DEFAULT_MAX_MESSAGE_LENGTH, "", 0, DEFAULT_PRIORITY, true).ern();
+                DEFAULT_MAX_MESSAGE_LENGTH, registration.queueName() + DLQ_SUFFIX, 0, DEFAULT_PRIORITY, true).ern();
         touchHeartbeat(queueErn);
 
         String subscriptionErn = euclidEsm.subscribe(bucketErn, "SQS", queueErn, registration.eventTypes(),
@@ -401,6 +418,14 @@ public class EuclidListenerContainer implements SmartLifecycle {
             Instant stale = Instant.now().minusSeconds(HEARTBEAT_STALE_SECONDS);
             Set<String> keptQueueErns = new HashSet<>();
             for (Queue queue : queues == null ? List.<Queue>of() : queues) {
+                // The dead letter queue shares this prefix and never carries a heartbeat, so it
+                // would look abandoned within minutes - and deleting it would throw away the
+                // failures somebody is going to come looking for. It belongs to the listener, not
+                // to a run of it.
+                if (queue.name() != null && queue.name().endsWith(DLQ_SUFFIX)) {
+                    if (queue.ern() != null) keptQueueErns.add(queue.ern());
+                    continue;
+                }
                 if (queue.name() == null || queue.name().endsWith("-" + runId) || !isStale(queue, stale)) {
                     if (queue.ern() != null) {
                         keptQueueErns.add(queue.ern());
@@ -664,7 +689,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
         logger.info("Reporting load for instance "+instanceId+" every "+UTILISATION_PERIOD_SECONDS+"s, capacity "+capacity+" concurrent handlers");
     }
 
-        /**
+    /**
      * How many messages are waiting across the queues this process polls.
      *
      * <p>Best effort: a queue that cannot be counted contributes nothing rather than failing the
@@ -1115,7 +1140,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
         // The defaults of createQueue(name), spelled out because saying "internal" means saying
         // all of them.
         return euclidSqs.createQueue(queueName, DEFAULT_VISIBILITY_SECONDS, DEFAULT_MAX_RETRIES,
-                DEFAULT_MAX_MESSAGE_LENGTH, "", 0, DEFAULT_PRIORITY, true).ern();
+                DEFAULT_MAX_MESSAGE_LENGTH, queueName + DLQ_SUFFIX, 0, DEFAULT_PRIORITY, true).ern();
     }
 
     private void pollMessages(MessageRegistration registration, String ern, int index) {

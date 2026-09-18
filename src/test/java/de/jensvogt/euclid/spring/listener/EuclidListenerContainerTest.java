@@ -330,9 +330,17 @@ class EuclidListenerContainerTest {
         container.start();
 
         ArgumentCaptor<String> queueName = ArgumentCaptor.forClass(String.class);
-        verify(euclidEqs, timeout(1000)).createQueue(queueName.capture(), eq(300L), anyLong(), anyLong(), eq(""), anyLong(), eq("MEDIUM"), eq(true));
+        ArgumentCaptor<String> dlqName = ArgumentCaptor.forClass(String.class);
+        verify(euclidEqs, timeout(1000)).createQueue(queueName.capture(), eq(300L), anyLong(), anyLong(),
+                dlqName.capture(), anyLong(), eq("MEDIUM"), eq(true));
         // The run id keeps this run's queue apart from one another run of the same listener owns.
         assertTrue(queueName.getValue().startsWith("invoice-import-"), queueName.getValue());
+
+        // The dead letter queue carries no run id, so it outlives the run whose failures it holds -
+        // and without one at all EQS has nowhere to put a message that keeps failing, so it hands
+        // it back for ever. A poison event was seen redelivered nineteen times against a limit of
+        // three, for want of this argument.
+        assertEquals("invoice-import-dlq", dlqName.getValue());
         verify(euclidEsm, timeout(1000)).subscribe("bucket-ern", "SQS", "delivery-ern", OBJECT_EVENTS, "reports/",
                 false);
         verify(euclidEqs, timeout(1000).atLeastOnce()).receiveMessages("delivery-ern", 10, 0);
@@ -418,6 +426,32 @@ class EuclidListenerContainerTest {
      * the debris only grew: 62 abandoned queues holding 11,946 messages on one development
      * installation, the oldest three days old.
      */
+    /**
+     * The dead letter queue shares the listener's queue prefix and never carries a heartbeat, so a
+     * sweep judging it by age would delete it within minutes - throwing away exactly the failures
+     * it was created to keep, and doing so on the next start after the run that produced them.
+     */
+    @Test
+    void theDeadLetterQueueIsNotSweptAwayWithTheRunThatFailed() throws Exception {
+        String dlqErn = queueErnOf("invoice-import-dlq");
+        when(euclidEqs.listQueues(anyString(), anyLong(), anyLong(), anyString(), anyString(), anyBoolean())).thenReturn(
+                ListQueueResponse.builder().queues(List.of(
+                        // Old enough to look abandoned, and with no heartbeat - which is what a
+                        // dead letter queue always looks like, since nothing beats for it.
+                        queue("invoice-import-dlq", dlqErn, Instant.now().minusSeconds(3600)),
+                        queue("invoice-import-dead", queueErnOf("invoice-import-dead"), Instant.now().minusSeconds(3600)))).total(2).build());
+        stubReceive(message(BUCKET_EVENT_BODY));
+        EventHandler handler = new EventHandler();
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "", false);
+
+        container.start();
+
+        // The abandoned run's queue still goes...
+        verify(euclidEqs, timeout(1000)).deleteQueue(queueErnOf("invoice-import-dead"));
+        // ...and the dead letter queue stays.
+        verify(euclidEqs, never()).deleteQueue(dlqErn);
+    }
+
     @Test
     void oneQueueThatWillNotDeleteDoesNotStopTheSweep() throws Exception {
         String firstErn = queueErnOf("invoice-import-first");
@@ -540,8 +574,8 @@ class EuclidListenerContainerTest {
 
         // Internal: a topic listener's delivery queue is plumbing behind the subscription, and
         // listing it invites somebody to act on a queue that is not theirs to act on.
-        verify(euclidEqs, timeout(1000)).createQueue(eq("orders-app"), anyLong(), anyLong(), anyLong(), eq(""),
-                anyLong(), eq("MEDIUM"), eq(true));
+        verify(euclidEqs, timeout(1000)).createQueue(eq("orders-app"), anyLong(), anyLong(), anyLong(),
+                eq("orders-app-dlq"), anyLong(), eq("MEDIUM"), eq(true));
         verify(euclidEns, timeout(1000)).subscribe("topic-ern", "orders-app-ern");
         verify(euclidEqs, timeout(1000).atLeastOnce()).receiveMessages("orders-app-ern", 10, 0);
     }
