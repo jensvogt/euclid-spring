@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.36](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.35...euclid-spring-boot-starter-v0.1.36) (2026-09-18)
+
+
+### Bug Fixes
+
+* ESM queue naming ([ff39936](https://github.com/jensvogt/euclid-spring/commit/ff3993602aed47385ae417abc55645ad33474e30))
+
 ## [0.1.35](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.34...euclid-spring-boot-starter-v0.1.35) (2026-09-16)
 
 
