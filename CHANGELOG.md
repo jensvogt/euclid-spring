@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.45](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.44...euclid-spring-boot-starter-v0.1.45) (2026-09-22)
+
+
+### Bug Fixes
+
+* bump version of euclid-jdk to 0.1.46 ([17e2b04](https://github.com/jensvogt/euclid-spring/commit/17e2b043176648f1cd4756a168f845a3bc28b6fc))
+
 ## [0.1.44](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.43...euclid-spring-boot-starter-v0.1.44) (2026-09-21)
 
 
