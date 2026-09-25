@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.47](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.46...euclid-spring-boot-starter-v0.1.47) (2026-09-25)
+
+
+### Features
+
+* new application load reporting ([d9da7f7](https://github.com/jensvogt/euclid-spring/commit/d9da7f7eef1ccabcaf20d9ef3fd80c05af5f98ec))
+
 ## [0.1.46](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.45...euclid-spring-boot-starter-v0.1.46) (2026-09-23)
 
 
