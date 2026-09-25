@@ -170,10 +170,18 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private final AtomicLong activeHandlers = new AtomicLong();
 
     /**
-     * Whether the last attempt to report load failed, so the first failure of a run can be logged
-     * loudly and the ones after it quietly.
+     * Whether the last attempt to report load to EAP failed, so the first failure of a run can be
+     * logged loudly and the ones after it quietly.
      */
     private final AtomicBoolean loadReportFailed = new AtomicBoolean(false);
+
+    /**
+     * The same for the metrics push to EMO, kept apart from {@link #loadReportFailed} because the
+     * two fail for different reasons and cost different things - one blinds the autoscaler, the
+     * other leaves a gap in a graph. One flag for both would have reported whichever failed first
+     * and gone quiet about the other.
+     */
+    private final AtomicBoolean metricsPushFailed = new AtomicBoolean(false);
 
     /**
      * Every queue this process is polling, however, its listener arrived at one - named outright,
@@ -642,96 +650,199 @@ public class EuclidListenerContainer implements SmartLifecycle {
             return;
         }
 
+        // Resolved once, and neither is required. EAP carries the report the autoscaler acts on;
+        // EMO carries the same numbers for the graphs. Missing EAP is the one worth a warning -
+        // without it the pool never grows - where missing EMO costs history and nothing else.
+        //
+        // Both were behind one EuclidEmo check before, so an application wired without that bean
+        // reported nothing to either, including to the road that would have worked.
+        final EuclidEap euclidEap = euclidEapProvider.getIfAvailable();
         final EuclidEmo euclidEmo = euclidEmoProvider.getIfAvailable();
-        if (euclidEmo == null) {
+        if (euclidEap == null && euclidEmo == null) {
             // A warning rather than information: this process *is* a euclid application instance,
             // so load reporting was meant to happen and something is wrong with the wiring.
-            logger.warn("Not reporting load for instance " + instanceId + ": no EuclidEmo bean is available, so the "
-                                + "autoscaler will see nothing from this instance");
+            logger.warn("Not reporting load for instance " + instanceId + ": neither a EuclidEap nor a EuclidEmo bean "
+                                + "is available, so the autoscaler will see nothing from this instance");
             return;
+        }
+        if (euclidEap == null) {
+            logger.warn("No EuclidEap bean is available, so instance " + instanceId + " reports only to EMO: the "
+                                + "autoscaler reads the instance record, not the metrics store, and will not see it");
         }
 
         final int capacity = concurrencySum(queueRegistrations) + concurrencySum(topicRegistrations)
                              + concurrencySum(bucketRegistrations);
         ensureScheduler();
-        heartbeats.scheduleAtFixedRate(() -> {
-            try {
-                long now = System.nanoTime();
-                long windowStart = windowStartNanos.getAndSet(now);
-                long busy = busyNanos.getAndSet(0);
-                long elapsed = now - windowStart;
-                if (elapsed <= 0 || capacity <= 0) {
-                    return;
-                }
-
-                // Against capacity, not the clock: a listener sized for eight concurrent handlers
-                // with four of them running is half loaded, not fully. Dividing by elapsed alone
-                // would report 400% and make every multi-threaded listener look saturated the
-                // moment two messages arrived together.
-                double utilisation = 100.0 * busy / ((double) elapsed * capacity);
-
-                // Utilisation alone cannot tell "working through a burst, nearly done" from
-                // "cannot keep up": both read as busy. The depth of what is still waiting is the
-                // other half, and this process is the only party that knows which queues those
-                // are - a bucket listener's delivery queue is created at runtime and named after
-                // this run.
-                //
-                // Labelled by instance like the utilisation beside it, not by application: EMO
-                // averages the samples that share a label, so three instances reporting their own
-                // depth under one application label would report the mean rather than the total.
-                // The reader sums the series instead.
-                if (loadReportFailed.compareAndSet(true, false)) {
-                    logger.info("Load reporting for instance " + instanceId + " is working again");
-                }
-                double reported = Math.min(100.0, utilisation);
-                double backlog = currentBacklog();
-
-                // To EMO for the history and the dashboards, unchanged.
-                euclidEmo.pushMetrics(applicationId == null ? "application" : applicationId,
-                                      List.of(Metric.gauge("application-utilisation", "instance", instanceId,
-                                                           reported),
-                                              Metric.gauge("application-backlog", "instance", instanceId,
-                                                           backlog)));
-
-                // And to EAP for the autoscaler. The same numbers by a different road, because EMO
-                // holds them in memory until its averaging bucket closes - five minutes, as
-                // shipped - and a pool that reacts five minutes late is a pool that is always
-                // scaling for the load before last. This lands on the instance record the manager
-                // reads on its next reconcile.
-                final EuclidEap euclidEap = euclidEapProvider.getIfAvailable();
-                // The handler count goes with them, and is the one figure of the three that is read
-                // as an instruction rather than as a measurement: scale-down passes over an
-                // instance reporting any. Utilisation cannot stand in for it - it is an average
-                // over the window just ended, so an instance that picked up a long message a moment
-                // ago reports next to nothing and reads as the idlest one in the pool.
-                if (euclidEap != null) {
-                    euclidEap.reportLoad(instanceId, reported, Math.round(backlog), activeHandlers.get(),
-                                         applicationId == null ? "" : applicationId);
-                }
-
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } catch (Exception e) {
-                // Never fatal: the listeners are the point of this process, and a monitoring push
-                // that cannot get through must not stop them. But the first failure is said out
-                // loud - a reporter that never succeeds looks exactly like one that was never
-                // started, and that is a difference worth one log line. Every failure after it
-                // drops to debug, so a broken endpoint cannot fill the log.
-                if (!running.get()) {
-                    // The same failure the pollers see on the way out, for the same reason: this
-                    // process is stopping and what it was reporting to is either gone or about to
-                    // be. A warning here would be the loudest line in a clean shutdown.
-                    logger.debug("Load report ended during shutdown", e);
-                } else if (loadReportFailed.compareAndSet(false, true)) {
-                    logger.warn("Could not report load for instance " + instanceId
-                                        + "; the autoscaler will not see this instance until it succeeds", e);
-                } else {
-                    logger.debug("Could not report load", e);
-                }
-            }
-        }, UTILISATION_PERIOD_SECONDS, UTILISATION_PERIOD_SECONDS, TimeUnit.SECONDS);
+        heartbeats.scheduleAtFixedRate(
+                () -> reportOnce(euclidEap, euclidEmo, instanceId, applicationId, capacity),
+                UTILISATION_PERIOD_SECONDS, UTILISATION_PERIOD_SECONDS, TimeUnit.SECONDS);
 
         logger.info("Reporting load for instance "+instanceId+" every "+UTILISATION_PERIOD_SECONDS+"s, capacity "+capacity+" concurrent handlers");
+    }
+
+    /**
+     * One reporting tick: measures the window just ended and sends it both ways.
+     *
+     * <p>Package-private rather than inlined in the scheduled task so that it can be driven
+     * directly. Reporting only starts when {@code EUCLID_INSTANCE_ID} is in the environment, which
+     * a test cannot arrange for itself, so as a lambda this was unreachable - which is how the two
+     * sends came to share a try block with the essential one second, and nothing noticed.
+     *
+     * @param euclidEap     client the load report goes through, or {@code null} for none
+     * @param euclidEmo     client the metrics push goes through, or {@code null} for none
+     * @param instanceId    this instance, from {@code EUCLID_INSTANCE_ID}
+     * @param applicationId the application, or {@code null} when it is not in the environment
+     * @param capacity      concurrent handlers this process is sized for, which utilisation is
+     *                      measured against
+     */
+    void reportOnce(EuclidEap euclidEap, EuclidEmo euclidEmo, String instanceId, String applicationId, int capacity) {
+        try {
+            long now = System.nanoTime();
+            long windowStart = windowStartNanos.getAndSet(now);
+            long busy = busyNanos.getAndSet(0);
+            long elapsed = now - windowStart;
+            if (elapsed <= 0 || capacity <= 0) {
+                return;
+            }
+
+            // Against capacity, not the clock: a listener sized for eight concurrent handlers with
+            // four of them running is half loaded, not fully. Dividing by elapsed alone would
+            // report 400% and make every multi-threaded listener look saturated the moment two
+            // messages arrived together.
+            double utilisation = 100.0 * busy / ((double) elapsed * capacity);
+
+            // Utilisation alone cannot tell "working through a burst, nearly done" from "cannot
+            // keep up": both read as busy. The depth of what is still waiting is the other half,
+            // and this process is the only party that knows which queues those are - a bucket
+            // listener's delivery queue is created at runtime and named after this run.
+            double reported = Math.min(100.0, utilisation);
+            double backlog = currentBacklog();
+
+            // EAP first, and the two are sent independently. They used to share a try block with
+            // the EMO push above the EAP report, so anything that failed the push took the report
+            // with it - and the one that failed was the push: emo:push-metrics was not in the
+            // built-in "application" role, so every tick ended in a 403 before it reached the line
+            // the autoscaler depends on. The warning even said the autoscaler would not see this
+            // instance, which was true, and not for the reason it named.
+            //
+            // Order matters for the same reason: if one of them is going to fail, it should be the
+            // one that only costs a gap in a graph.
+            reportLoadToEap(euclidEap, instanceId, applicationId, reported, backlog);
+
+            // An interrupt is this process shutting down, not a failed report - nothing else to do
+            // on this tick.
+            if (Thread.currentThread().isInterrupted()) {
+                return;
+            }
+
+            pushMetricsToEmo(euclidEmo, instanceId, applicationId, reported, backlog);
+
+        } catch (Exception e) {
+            // Never fatal: the listeners are the point of this process, and reporting that cannot
+            // get through must not stop them - an exception escaping here would also kill the
+            // scheduled task and cost every report after it. Both roads handle their own failures,
+            // so anything arriving here is the measurement itself having gone wrong.
+            logger.debug("Load reporting tick failed", e);
+        }
+    }
+
+    /**
+     * Reports this instance's load to EAP, which is what the autoscaler acts on.
+     *
+     * <p>Straight onto the instance record the manager reads on its next reconcile - where EMO
+     * holds a sample until its averaging bucket closes, five minutes as shipped, so a pool driven
+     * from there is always scaling for the load before last.
+     *
+     * <p>Failures are swallowed after being logged: a report that does not arrive costs
+     * responsiveness, and an exception escaping here would kill the scheduled task and cost every
+     * report after it too. The first failure of a run is said out loud - a reporter that never
+     * succeeds looks exactly like one that was never started - and the ones after it drop to debug
+     * so a broken endpoint cannot fill the log.
+     *
+     * @param euclidEap     client to report through, or {@code null} when no bean is available
+     * @param instanceId    this instance, from {@code EUCLID_INSTANCE_ID}
+     * @param applicationId the application, or {@code null} when it is not in the environment
+     * @param utilisation   how busy this instance is, 0-100
+     * @param backlog       how much work is waiting across the queues it polls
+     */
+    private void reportLoadToEap(EuclidEap euclidEap, String instanceId, String applicationId,
+                                 double utilisation, double backlog) {
+        if (euclidEap == null) {
+            return;
+        }
+        try {
+            // The handler count goes with them, and is the one figure of the three that is read as
+            // an instruction rather than as a measurement: scale-down passes over an instance
+            // reporting any. Utilisation cannot stand in for it - it is an average over the window
+            // just ended, so an instance that picked up a long message a moment ago reports next to
+            // nothing and reads as the idlest one in the pool.
+            euclidEap.reportLoad(instanceId, utilisation, Math.round(backlog), activeHandlers.get(),
+                                 applicationId == null ? "" : applicationId);
+            if (loadReportFailed.compareAndSet(true, false)) {
+                logger.info("Load reporting for instance " + instanceId + " is working again");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            if (!running.get()) {
+                // The same failure the pollers see on the way out, for the same reason: this
+                // process is stopping and what it was reporting to is either gone or about to be.
+                // A warning here would be the loudest line in a clean shutdown.
+                logger.debug("Load report ended during shutdown", e);
+            } else if (loadReportFailed.compareAndSet(false, true)) {
+                logger.warn("Could not report load for instance " + instanceId
+                                    + "; the autoscaler will not see this instance until it succeeds", e);
+            } else {
+                logger.debug("Could not report load", e);
+            }
+        }
+    }
+
+    /**
+     * Pushes the same two figures to EMO, for the history and the dashboards.
+     *
+     * <p>Labelled by instance rather than by application: EMO averages the samples that share a
+     * label, so three instances reporting their own depth under one application label would report
+     * the mean rather than the total. The reader sums the series instead.
+     *
+     * <p>Handled apart from {@link #reportLoadToEap} so that neither can cost the other. What is
+     * lost when this fails is a gap in a graph, which is why it goes second and why its warning
+     * says that and not that the autoscaler is blind.
+     *
+     * @param euclidEmo     client to push through, or {@code null} when no bean is available
+     * @param instanceId    this instance, from {@code EUCLID_INSTANCE_ID}
+     * @param applicationId the application, or {@code null} when it is not in the environment
+     * @param utilisation   how busy this instance is, 0-100
+     * @param backlog       how much work is waiting across the queues it polls
+     */
+    private void pushMetricsToEmo(EuclidEmo euclidEmo, String instanceId, String applicationId,
+                                  double utilisation, double backlog) {
+        if (euclidEmo == null) {
+            return;
+        }
+        try {
+            euclidEmo.pushMetrics(applicationId == null ? "application" : applicationId,
+                                  List.of(Metric.gauge("application-utilisation", "instance", instanceId, utilisation),
+                                          Metric.gauge("application-backlog", "instance", instanceId, backlog)));
+            if (metricsPushFailed.compareAndSet(true, false)) {
+                logger.info("Metrics for instance " + instanceId + " are reaching EMO again");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            if (!running.get()) {
+                logger.debug("Metrics push ended during shutdown", e);
+            } else if (metricsPushFailed.compareAndSet(false, true)) {
+                // Says what is actually lost. A 403 here means the principal does not hold
+                // emo:push-metrics; scaling is unaffected either way, and saying otherwise sent
+                // whoever read it looking in the wrong place.
+                logger.warn("Could not push metrics for instance " + instanceId
+                                    + "; its history and dashboards will have gaps until it succeeds. "
+                                    + "Load reporting to EAP is separate and unaffected", e);
+            } else {
+                logger.debug("Could not push metrics", e);
+            }
+        }
     }
 
     /**
