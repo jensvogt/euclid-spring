@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.48](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.47...euclid-spring-boot-starter-v0.1.48) (2026-09-27)
+
+
+### Features
+
+* add infrastructure deployment ([7e83276](https://github.com/jensvogt/euclid-spring/commit/7e83276bda1947d00aec6414d904e86d5be1d604))
+
 ## [0.1.47](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.46...euclid-spring-boot-starter-v0.1.47) (2026-09-25)
 
 
