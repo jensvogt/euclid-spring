@@ -47,11 +47,13 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.atMost;
 import static org.mockito.Mockito.doThrow;
@@ -651,6 +653,118 @@ class EuclidListenerContainerTest {
 
         await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals(theMessage, handler.received));
         verify(euclidEqs, never()).deleteMessage(anyString());
+    }
+
+    // ── load reporting ──────────────────────────────────────────────────────────
+    //
+    // Two reports of the same two numbers, by different roads and for different readers: EAP holds
+    // the instance record the autoscaler reconciles against, EMO holds the history. They were sent
+    // in one try block with the EMO push first, so a push that failed took the load report with it -
+    // and the push did fail, on every tick, because the built-in "application" role did not hold
+    // emo:push-metrics. A pool that never grew, reported as a monitoring problem.
+
+    /**
+     * The regression. What is lost when EMO refuses is a gap in a graph; the autoscaler must go on
+     * being told.
+     */
+    @Test
+    void aMetricsPushThatFailsDoesNotCostTheLoadReport() throws Exception {
+        EuclidEmo refusing = mock(EuclidEmo.class);
+        doThrow(new EuclidServiceException("emo", "push-metrics", 403,
+                                           "no role granted here holds 'emo:push-metrics'"))
+                .when(refusing).pushMetrics(anyString(), anyList());
+
+        container.reportOnce(euclidEap, refusing, "instance-1", "file-copy", 1);
+
+        verify(euclidEap).reportLoad(eq("instance-1"), anyDouble(), anyLong(), anyLong(), eq("file-copy"));
+    }
+
+    /** And the other way about, since neither is allowed to cost the other. */
+    @Test
+    void aLoadReportThatFailsDoesNotCostTheMetricsPush() throws Exception {
+        EuclidEmo emo = mock(EuclidEmo.class);
+        doThrow(new EuclidServiceException("eap", "report-load", 503, "unavailable"))
+                .when(euclidEap).reportLoad(anyString(), anyDouble(), anyLong(), anyLong(), anyString());
+
+        container.reportOnce(euclidEap, emo, "instance-1", "file-copy", 1);
+
+        verify(emo).pushMetrics(eq("file-copy"), anyList());
+    }
+
+    /**
+     * Neither failure may escape: this runs inside scheduleAtFixedRate, which cancels the task when
+     * it throws. One refused tick would then be every tick after it as well, silently.
+     */
+    @Test
+    void aTickThatFailsEntirelyKeepsTheReporterAlive() throws Exception {
+        EuclidEmo refusing = mock(EuclidEmo.class);
+        doThrow(new EuclidServiceException("emo", "push-metrics", 403, "refused"))
+                .when(refusing).pushMetrics(anyString(), anyList());
+        doThrow(new EuclidServiceException("eap", "report-load", 503, "unavailable"))
+                .when(euclidEap).reportLoad(anyString(), anyDouble(), anyLong(), anyLong(), anyString());
+
+        container.reportOnce(euclidEap, refusing, "instance-1", "file-copy", 1);
+        container.reportOnce(euclidEap, refusing, "instance-1", "file-copy", 1);
+
+        // Still attempted the second time round, which is what "the task is still scheduled" means
+        // from in here.
+        verify(euclidEap, atLeast(2)).reportLoad(anyString(), anyDouble(), anyLong(), anyLong(), anyString());
+        verify(refusing, atLeast(2)).pushMetrics(anyString(), anyList());
+    }
+
+    /**
+     * A 403 from EMO says the metrics history has a gap, and says so without claiming the autoscaler
+     * is blind - which is what sent the last search for this in the wrong direction entirely.
+     */
+    @Test
+    void aRefusedMetricsPushIsReportedAsWhatItCosts() throws Exception {
+        ListAppender<ILoggingEvent> log = captureContainerLog();
+        EuclidEmo refusing = mock(EuclidEmo.class);
+        doThrow(new EuclidServiceException("emo", "push-metrics", 403, "refused"))
+                .when(refusing).pushMetrics(anyString(), anyList());
+        // Running, because a failure while the container is stopping is the shutdown rather than a
+        // problem and is logged at debug - which is the state a reportOnce() on its own is in.
+        startIdleListener();
+
+        container.reportOnce(euclidEap, refusing, "instance-1", "file-copy", 1);
+
+        ILoggingEvent warning = log.list.stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("nothing was logged about the refused push"));
+        assertTrue(warning.getFormattedMessage().contains("history and dashboards"),
+                   "unhelpful message: " + warning.getFormattedMessage());
+        assertTrue(warning.getFormattedMessage().contains("unaffected"),
+                   "does not say load reporting is separate: " + warning.getFormattedMessage());
+    }
+
+    /** One line per outage, not one per tick: a refused endpoint must not fill the log. */
+    @Test
+    void aRefusalIsLoudOnceAndQuietAfterwards() throws Exception {
+        ListAppender<ILoggingEvent> log = captureContainerLog();
+        EuclidEmo refusing = mock(EuclidEmo.class);
+        doThrow(new EuclidServiceException("emo", "push-metrics", 403, "refused"))
+                .when(refusing).pushMetrics(anyString(), anyList());
+        startIdleListener();
+
+        for (int tick = 0; tick < 5; tick++) {
+            container.reportOnce(euclidEap, refusing, "instance-1", "file-copy", 1);
+        }
+
+        assertEquals(1L, log.list.stream().filter(event -> event.getLevel() == Level.WARN).count());
+    }
+
+    /**
+     * Starts the container on one listener with nothing to receive, which is what the reporting
+     * cases need from it: {@code running} set, so a report that fails reads as a failure rather
+     * than as a shutdown.
+     */
+    private void startIdleListener() throws Exception {
+        when(euclidEqs.receiveMessages(anyString(), anyLong(), anyLong()))
+                .thenReturn(ReceiveMessagesResponse.builder().messages(Collections.emptyList()).total(0).build());
+        container.register(new StringHandler(), StringHandler.class.getMethod("handle", String.class),
+                           "test-queue", 10, 0, true, 1);
+        container.start();
     }
 
     /**
