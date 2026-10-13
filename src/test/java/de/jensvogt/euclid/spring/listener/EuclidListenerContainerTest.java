@@ -59,6 +59,7 @@ import static org.mockito.Mockito.atMost;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -306,6 +307,47 @@ class EuclidListenerContainerTest {
 
         await().atMost(Duration.ofSeconds(15))
                 .untilAsserted(() -> assertEquals(new TestPayload("abc", 5), handler.received));
+    }
+
+    /**
+     * A euclid that is down refuses a poll at once, without holding it open, so a poller that
+     * retried straight away would ask - and log an error - as fast as the refusals came back.
+     */
+    @Test
+    void failingPollIsNotRetriedInATightLoop() throws Exception {
+        ListAppender<ILoggingEvent> log = captureContainerLog();
+        when(euclidEqs.receiveMessages(anyString(), anyLong(), anyLong()))
+                .thenThrow(new IOException("Connection refused"));
+        container.register(new StringHandler(), StringHandler.class.getMethod("handle", String.class),
+                "test-queue", 10, 0, true, 1);
+
+        container.start();
+
+        // Waits of 1s and then 2s: two or three attempts in two seconds. Without the wait it was
+        // as many as the mock could answer.
+        Thread.sleep(2000);
+        verify(euclidEqs, atMost(3)).receiveMessages(anyString(), anyLong(), anyLong());
+        assertEquals(1, log.list.stream().filter(event -> event.getLevel() == Level.ERROR).count());
+    }
+
+    @Test
+    void pollingResumesOnceEuclidAnswersAgain() throws Exception {
+        ListAppender<ILoggingEvent> log = captureContainerLog();
+        when(euclidEqs.receiveMessages(anyString(), anyLong(), anyLong()))
+                .thenThrow(new IOException("Connection refused"))
+                .thenThrow(new IOException("Connection refused"))
+                .thenReturn(ReceiveMessagesResponse.builder()
+                        .messages(List.of(message("{\"name\":\"abc\",\"value\":5}"))).total(1).build())
+                .thenReturn(ReceiveMessagesResponse.builder().messages(Collections.emptyList()).total(0).build());
+        TypedHandler handler = new TypedHandler();
+        container.register(handler, TypedHandler.class.getMethod("handle", TestPayload.class),
+                "test-queue", 10, 0, true, 1);
+
+        container.start();
+
+        await().atMost(Duration.ofSeconds(8))
+                .untilAsserted(() -> assertEquals(new TestPayload("abc", 5), handler.received));
+        assertTrue(loggedAt(log, Level.INFO, "Polling queue 'test-queue' recovered after 2 failed attempts"));
     }
 
     @Test
@@ -625,8 +667,12 @@ class EuclidListenerContainerTest {
         verify(euclidEqs, timeout(1000).atLeastOnce()).receiveMessages("orders-app-ern", 10, 0);
     }
 
+    /**
+     * A topic that cannot be resolved is asked for again rather than given up on - and nothing is
+     * polled meanwhile, since there is no queue yet to poll.
+     */
     @Test
-    void topicListenerIsNotStartedWhenTheTopicCannotBeResolved() throws Exception {
+    void topicListenerKeepsTryingWhileTheTopicCannotBeResolved() throws Exception {
         when(euclidEns.getTopicErn("missing"))
                 .thenThrow(new EuclidServiceException("ens", "get-topic-ern", 404, "not found"));
         stubReceive(message("published-body"));
@@ -636,9 +682,74 @@ class EuclidListenerContainerTest {
 
         container.start();
 
-        await().pollDelay(Duration.ofMillis(300)).atMost(Duration.ofSeconds(2))
-                .untilAsserted(() -> assertNull(handler.received));
+        verify(euclidEns, timeout(3000).atLeast(2)).getTopicErn("missing");
+        assertNull(handler.received);
         verify(euclidEqs, never()).receiveMessages(anyString(), anyLong(), anyLong());
+    }
+
+    /**
+     * The overnight restart: the application came up while ESM was still down, and its bucket
+     * listener used to give up for good on the first refusal - leaving a process that was healthy
+     * by every check and received nothing. Now it starts as soon as ESM answers.
+     */
+    @Test
+    void bucketListenerStartsOnceEuclidIsBackAfterAFailedStart() throws Exception {
+        ListAppender<ILoggingEvent> log = captureContainerLog();
+        when(euclidEsm.getBucketErn("invoices"))
+                .thenThrow(new EuclidServiceException("esm", "get-bucket-ern", 503, "unavailable"))
+                .thenThrow(new EuclidServiceException("esm", "get-bucket-ern", 503, "unavailable"))
+                .thenReturn(GetBucketErnResponse.builder().ern("bucket-ern").build());
+        stubReceive(message(BUCKET_EVENT_BODY));
+        EventHandler handler = new EventHandler();
+        registerBucket(handler, EventHandler.class.getMethod("handle", Event.class), "invoices", "reports/", false);
+
+        container.start();
+
+        // Waits of 1s and then 2s before the third attempt.
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertNotNull(handler.received));
+        verify(euclidEsm, times(3)).getBucketErn("invoices");
+        verify(euclidEsm, times(1)).subscribe("bucket-ern", "SQS", "delivery-ern", OBJECT_EVENTS, "reports/", false);
+        assertTrue(loggedAt(log, Level.WARN, "Could not subscribe to bucket 'invoices', retrying in 1s"));
+        assertTrue(loggedAt(log, Level.INFO, "Listener for bucket 'invoices' started after 3 attempts"));
+    }
+
+    @Test
+    void queueListenerStartsOnceItsQueueCanBeResolved() throws Exception {
+        when(euclidEqs.getQueueErn("test-queue"))
+                .thenThrow(new EuclidServiceException("eqs", "get-queue-ern", 503, "unavailable"))
+                .thenReturn(GetQueueErnResponse.builder().ern("test-ern").build());
+        stubReceive(message("{\"name\":\"abc\",\"value\":5}"));
+        TypedHandler handler = new TypedHandler();
+        container.register(handler, TypedHandler.class.getMethod("handle", TestPayload.class),
+                "test-queue", 10, 0, true, 2);
+
+        container.start();
+
+        await().atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> assertEquals(new TestPayload("abc", 5), handler.received));
+        verify(euclidEqs, times(2)).getQueueErn("test-queue");
+    }
+
+    /**
+     * Retrying must not keep a stopping application waiting: euclid sends SIGKILL five seconds
+     * after SIGTERM, and a listener sleeping out a thirty-second backoff would be killed rather
+     * than stopped.
+     */
+    @Test
+    void stoppingEndsAListenerThatIsStillTryingToStart() throws Exception {
+        when(euclidEqs.getQueueErn("test-queue"))
+                .thenThrow(new EuclidServiceException("eqs", "get-queue-ern", 503, "unavailable"));
+        container.register(new StringHandler(), StringHandler.class.getMethod("handle", String.class),
+                "test-queue", 10, 0, true, 1);
+        container.start();
+        verify(euclidEqs, timeout(1000)).getQueueErn("test-queue");
+
+        long startedAt = System.nanoTime();
+        container.stop();
+
+        assertTrue(Duration.ofNanos(System.nanoTime() - startedAt).compareTo(Duration.ofMillis(500)) < 0);
+        Thread.sleep(1500);
+        verify(euclidEqs, times(1)).getQueueErn("test-queue");
     }
 
     @Test

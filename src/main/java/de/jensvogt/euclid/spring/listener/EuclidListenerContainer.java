@@ -113,6 +113,40 @@ public class EuclidListenerContainer implements SmartLifecycle {
      */
     private static final Duration QUEUE_STOPPED_RETRY = Duration.ofSeconds(5);
 
+    /**
+     * How long a listener that could not start waits before trying again, doubling up to
+     * {@link #STARTUP_RETRY_MAX}.
+     *
+     * <p>Retried at all because giving up is silent. A listener that cannot resolve its queue at
+     * startup used to log once and never poll, while the process stayed up and reported itself
+     * healthy - so nothing restarted it. Seen when euclid restarted overnight and relaunched its
+     * applications half a minute before ESM was back: the parser came up without its bucket
+     * listener, and 360,382 Vollmeldungen waited in its queue for a day and a half with nothing
+     * receiving them.
+     */
+    private static final Duration STARTUP_RETRY_INITIAL = Duration.ofSeconds(1);
+
+    /**
+     * The longest wait between two attempts to start a listener. Short enough that one whose
+     * modules come back starts within half a minute, long enough that one which never will - a
+     * queue name nobody created - is a line in the log every half minute rather than a stream.
+     */
+    private static final Duration STARTUP_RETRY_MAX = Duration.ofSeconds(30);
+
+    /**
+     * How long a poller waits after a poll fails for any reason other than a stopped queue,
+     * doubling up to {@link #POLL_RETRY_MAX} while the failures continue and starting over once a
+     * poll succeeds.
+     */
+    private static final Duration POLL_RETRY_INITIAL = Duration.ofSeconds(1);
+
+    /**
+     * The longest wait between two failed polls. Shorter than {@link #STARTUP_RETRY_MAX}: a
+     * listener that was running is one whose modules are expected back - a restart, a moment of
+     * load - and it should be consuming again within seconds of them answering.
+     */
+    private static final Duration POLL_RETRY_MAX = Duration.ofSeconds(10);
+
     /** Queue settings a delivery queue is created with, beyond its visibility timeout. */
     private static final long DEFAULT_MAX_RETRIES = 3;
     private static final long DEFAULT_MAX_MESSAGE_LENGTH = 1024 * 1024;
@@ -361,26 +395,81 @@ public class EuclidListenerContainer implements SmartLifecycle {
      */
     private void startBucketListener(BucketRegistration registration) {
         executor.submit(() -> {
-            String queueErn;
-            try {
+            // Retried as a whole: openBucketDelivery is safe to repeat, since creating a queue that
+            // is already there returns it and ESM keys a subscription on source, type and target.
+            String queueErn = untilStarted(registration, "subscribe to", () -> {
                 String bucketErn = euclidEsm.getBucketErn(registration.bucketName()).ern();
                 sweepOrphanedQueues(registration, bucketErn);
-                queueErn = openBucketDelivery(registration, bucketErn);
-            } catch (Exception e) {
-                logger.error("Could not subscribe to " + registration.describe() + ", listener not started", e);
-                if (e instanceof InterruptedException) {
-                    Thread.currentThread().interrupt();
-                }
-                return;
+                return openBucketDelivery(registration, bucketErn);
+            });
+            if (queueErn != null) {
+                poll(registration, queueErn);
             }
-            // This thread becomes the first of the registration's pollers, so the executor holds
-            // exactly the concurrency() threads start() sized it for.
-            for (int i = 1; i < Math.max(1, registration.concurrency()); i++) {
-                final int index = i;
-                executor.submit(() -> pollMessages(registration, queueErn, index));
-            }
-            pollMessages(registration, queueErn, 0);
         });
+    }
+
+    /**
+     * Runs the step a listener needs before it can poll - resolving its queue, subscribing it -
+     * until it succeeds or this container stops, waiting longer after each failure.
+     *
+     * <p>Run on the listener's own thread, never on the one calling {@link #start()}: a listener
+     * waiting for euclid to come back must not hold up the application context, nor every other
+     * listener behind it. {@link #stop()} interrupts the wait like it interrupts a poll.
+     *
+     * <p>The first failure is logged with its stack trace and the ones after it without, so a
+     * listener that cannot start is visible in the log for as long as it cannot - not just once,
+     * at startup, where the next restart scrolls it away.
+     *
+     * @param action what the step does, as the log line says it - "subscribe to", "resolve"
+     * @return the ERN of the queue to poll, or {@code null} if the container stopped first
+     */
+    private String untilStarted(MessageRegistration registration, String action, StartupStep step) {
+        long delayMillis = STARTUP_RETRY_INITIAL.toMillis();
+        for (int attempt = 1; running.get() && !Thread.currentThread().isInterrupted(); attempt++) {
+            try {
+                String ern = step.run();
+                if (attempt > 1) {
+                    logger.info("Listener for " + registration.describe() + " started after " + attempt + " attempts");
+                }
+                return ern;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            } catch (Exception e) {
+                if (!running.get() || Thread.currentThread().isInterrupted()) {
+                    return null;
+                }
+                String text = "Could not " + action + " " + registration.describe() + ", retrying in "
+                              + delayMillis / 1000 + "s";
+                if (attempt == 1) {
+                    logger.warn(text, e);
+                } else {
+                    logger.warn(text + ": " + e.getMessage());
+                }
+                sleepQuietly(delayMillis);
+                delayMillis = Math.min(delayMillis * 2, STARTUP_RETRY_MAX.toMillis());
+            }
+        }
+        return null;
+    }
+
+    /** What {@link #untilStarted} retries: one attempt at getting a listener the queue it polls. */
+    @FunctionalInterface
+    private interface StartupStep {
+
+        String run() throws Exception;
+    }
+
+    /**
+     * Polls {@code ern} with the registration's concurrency. The calling thread becomes the first
+     * of the pollers, so the executor holds exactly the concurrency() threads start() sized it for.
+     */
+    private void poll(MessageRegistration registration, String ern) {
+        for (int i = 1; i < Math.max(1, registration.concurrency()); i++) {
+            final int index = i;
+            executor.submit(() -> pollMessages(registration, ern, index));
+        }
+        pollMessages(registration, ern, 0);
     }
 
     /**
@@ -1031,17 +1120,13 @@ public class EuclidListenerContainer implements SmartLifecycle {
      * be more than one without asking the same question that many times over.
      */
     private void startQueueListener(QueueRegistration registration) {
-        String ern;
-        try {
-            ern = euclidSqs.getQueueErn(registration.queueName()).ern();
-        } catch (Exception e) {
-            logger.error("Could not resolve " + registration.describe() + ", listener not started", e);
-            return;
-        }
-        for (int i = 0; i < Math.max(1, registration.concurrency()); i++) {
-            final int index = i;
-            executor.submit(() -> pollMessages(registration, ern, index));
-        }
+        executor.submit(() -> {
+            String ern = untilStarted(registration, "resolve",
+                    () -> euclidSqs.getQueueErn(registration.queueName()).ern());
+            if (ern != null) {
+                poll(registration, ern);
+            }
+        });
     }
 
     /**
@@ -1051,20 +1136,12 @@ public class EuclidListenerContainer implements SmartLifecycle {
      * once.
      */
     private void startTopicListener(TopicRegistration registration) {
-        String ern;
-        try {
-            ern = subscribedQueueErn(registration);
-        } catch (Exception e) {
-            logger.error("Could not subscribe to " + registration.describe() + ", listener not started", e);
-            if (e instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
+        executor.submit(() -> {
+            String ern = untilStarted(registration, "subscribe to", () -> subscribedQueueErn(registration));
+            if (ern != null) {
+                poll(registration, ern);
             }
-            return;
-        }
-        for (int i = 0; i < Math.max(1, registration.concurrency()); i++) {
-            final int index = i;
-            executor.submit(() -> pollMessages(registration, ern, index));
-        }
+        });
     }
 
     /**
@@ -1306,6 +1383,8 @@ public class EuclidListenerContainer implements SmartLifecycle {
         Thread.currentThread().setName("euclid-" + registration.name() + "-" + index);
         polledQueueErns.add(ern);
         boolean stopped = false;
+        int failures = 0;
+        long failureDelayMillis = POLL_RETRY_INITIAL.toMillis();
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 List<Message> messages = euclidSqs
@@ -1314,6 +1393,12 @@ public class EuclidListenerContainer implements SmartLifecycle {
                 if (stopped) {
                     logger.info("Queue of " + registration.describe() + " is available again, consuming resumed");
                     stopped = false;
+                }
+                if (failures > 0) {
+                    logger.info("Polling " + registration.describe() + " recovered after " + failures
+                                + " failed attempts");
+                    failures = 0;
+                    failureDelayMillis = POLL_RETRY_INITIAL.toMillis();
                 }
                 for (Message message : messages) {
                     dispatch(registration, message);
@@ -1346,7 +1431,20 @@ public class EuclidListenerContainer implements SmartLifecycle {
                     // it was for.
                     sleepQuietly(QUEUE_STOPPED_RETRY.toMillis());
                 } else {
-                    logger.error("Error polling " + registration.describe(), e);
+                    // Waited out for the same reason as a stopped queue: a refused connection comes
+                    // back at once, so without a wait every poller of every listener would ask a
+                    // euclid that is down as fast as it can refuse, and log each refusal. The first
+                    // is logged with its stack trace and the rest in a line, as at startup.
+                    failures++;
+                    String text = "Error polling " + registration.describe() + ", retrying in "
+                                  + failureDelayMillis / 1000 + "s";
+                    if (failures == 1) {
+                        logger.error(text, e);
+                    } else {
+                        logger.warn(text + " (" + failures + " failures in a row): " + e.getMessage());
+                    }
+                    sleepQuietly(failureDelayMillis);
+                    failureDelayMillis = Math.min(failureDelayMillis * 2, POLL_RETRY_MAX.toMillis());
                 }
             }
         }
