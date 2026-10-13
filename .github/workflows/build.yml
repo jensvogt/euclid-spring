@@ -24,4 +24,4 @@ jobs:
       # Without -Prelease, so this stays a build and test rather than also signing artifacts with
       # a GPG key that only the release job has.
       - name: Build and test
-        run: mvn -B verify
+        run: ./mvnw -B verify

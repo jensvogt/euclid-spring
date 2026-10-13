@@ -44,8 +44,11 @@ jobs:
       # central-publishing plugins. Without it the default maven-deploy-plugin runs instead and
       # fails, since publishing goes through Central's plugin rather than a distributionManagement
       # repository.
+      # ./mvnw pins Maven 3.9.x: Maven 3.10 stages a maven-metadata-local.xml that
+      # central-publishing (0.11.0) doesn't clean up, and Central then rejects the bundle with
+      # "Bundle has content that does NOT have a .pom file".
       - name: Publish to Maven Central
-        run: mvn -B -Prelease clean deploy -DskipTests
+        run: ./mvnw -B -Prelease clean deploy -DskipTests
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
           CENTRAL_TOKEN: ${{ secrets.CENTRAL_TOKEN }}
