@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.52](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.51...euclid-spring-boot-starter-v0.1.52) (2026-10-13)
+
+
+### Features
+
+* add new EAP commands ([2e8fbf5](https://github.com/jensvogt/euclid-spring/commit/2e8fbf57478854ac0f6870efec4619827a6fd8b5))
+
 ## [0.1.51](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.50...euclid-spring-boot-starter-v0.1.51) (2026-10-13)
 
 
