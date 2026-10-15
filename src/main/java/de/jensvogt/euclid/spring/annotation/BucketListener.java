@@ -99,13 +99,18 @@ public @interface BucketListener {
     long maxMessages() default 10;
 
     /**
-     * Long-poll wait time in seconds passed to {@code EuclidEqs#receiveMessages}, which spends it
-     * waiting for the delivery queue's {@code eqs.message.sent} websocket event.
+     * Seconds EQS holds a receive open waiting for a message, passed to
+     * {@code EuclidEqs#receiveMessages}.
      *
-     * <p>Keep this above zero: {@code receiveMessages} does not wait at all for a
-     * {@code waitTime} of zero, which turns the listener's loop into a busy one.
+     * <p>Zero by default, which is short polling: each receive comes straight back, and the
+     * listener waits between polls of an empty queue itself, starting at 100 ms and doubling up to
+     * two seconds. A message sent to an idle queue is therefore picked up within about two seconds.
+     *
+     * <p>Above zero it is a long poll, picked up as soon as the message arrives - but each waiting
+     * receive occupies one of EQS's worker threads for the whole wait, and enough of them leave
+     * none for the sends that fill the queues. Use it only where that latency matters.
      */
-    long waitTime() default 20;
+    long waitTime() default 0;
 
     /**
      * Seconds the delivery queue makes a received event invisible for, so a handler that dies

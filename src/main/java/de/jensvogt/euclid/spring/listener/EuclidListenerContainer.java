@@ -36,6 +36,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -146,6 +147,27 @@ public class EuclidListenerContainer implements SmartLifecycle {
      * load - and it should be consuming again within seconds of them answering.
      */
     private static final Duration POLL_RETRY_MAX = Duration.ofSeconds(10);
+
+    /**
+     * How long a short-polling listener waits after a poll that found its queue empty, doubling up
+     * to {@link #IDLE_POLL_MAX} while the queue stays empty and starting over as soon as a poll
+     * returns messages.
+     *
+     * <p>A short poll ({@code waitTime} of zero) comes straight back, so without a wait here every
+     * idle listener would ask EQS as fast as it answers. The wait is the client's rather than the
+     * server's on purpose: a long poll holds one of the EQS instance's few worker threads for its
+     * whole duration, and with enough consumers waiting there is no thread left for the sends that
+     * would fill their queues - which is how a plain send-message came to time out.
+     */
+    private static final Duration IDLE_POLL_INITIAL = Duration.ofMillis(100);
+
+    /**
+     * The longest wait between two polls of an empty queue, and so the longest a message sent to
+     * an idle queue waits before it is picked up. Kept short because that is latency every first
+     * message after a quiet spell pays; one cheap counter read per listener thread every two
+     * seconds is what it costs.
+     */
+    private static final Duration IDLE_POLL_MAX = Duration.ofSeconds(2);
 
     /** Queue settings a delivery queue is created with, beyond its visibility timeout. */
     private static final long DEFAULT_MAX_RETRIES = 3;
@@ -1385,6 +1407,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
         boolean stopped = false;
         int failures = 0;
         long failureDelayMillis = POLL_RETRY_INITIAL.toMillis();
+        long idleDelayMillis = IDLE_POLL_INITIAL.toMillis();
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 List<Message> messages = euclidSqs
@@ -1402,6 +1425,14 @@ public class EuclidListenerContainer implements SmartLifecycle {
                 }
                 for (Message message : messages) {
                     dispatch(registration, message);
+                }
+                // A long poll has already waited on the server, so only a short one backs off here.
+                // A queue with messages is asked again at once: it is likely to hold more.
+                if (!messages.isEmpty() || registration.waitTime() > 0) {
+                    idleDelayMillis = IDLE_POLL_INITIAL.toMillis();
+                } else {
+                    sleepQuietly(withJitter(idleDelayMillis));
+                    idleDelayMillis = Math.min(idleDelayMillis * 2, IDLE_POLL_MAX.toMillis());
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -1461,6 +1492,15 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private static boolean isQueueStopped(Exception e) {
         return e instanceof EuclidServiceException serviceException
                && serviceException.statusCode() == HTTP_CONFLICT;
+    }
+
+    /**
+     * A wait somewhere between half and all of the given one, so that listener threads started
+     * together - every thread of a listener, every listener of an application - do not keep
+     * polling EQS in lockstep.
+     */
+    private static long withJitter(long millis) {
+        return millis / 2 + ThreadLocalRandom.current().nextLong(millis / 2 + 1);
     }
 
     /** Waits without turning an interrupt into a failure - the loop's own check handles that. */

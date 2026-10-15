@@ -310,6 +310,40 @@ class EuclidListenerContainerTest {
     }
 
     /**
+     * A short poll of an empty queue comes straight back, so without a wait of its own the listener
+     * would ask EQS as fast as it answers - the busy loop a {@code waitTime} of zero used to mean.
+     */
+    @Test
+    void emptyQueueIsNotShortPolledInATightLoop() throws Exception {
+        when(euclidEqs.receiveMessages(anyString(), anyLong(), anyLong()))
+                .thenReturn(ReceiveMessagesResponse.builder().messages(Collections.emptyList()).build());
+        container.register(new StringHandler(), StringHandler.class.getMethod("handle", String.class),
+                "test-queue", 10, 0, true, 1);
+
+        container.start();
+
+        // Waits of at most 100, 200, 400 and 800 ms, at least half of each: between four and nine
+        // polls in a second and a half. Without the wait it was as many as the mock could answer.
+        Thread.sleep(1500);
+        verify(euclidEqs, atMost(9)).receiveMessages(anyString(), anyLong(), anyLong());
+    }
+
+    /** A poll that returned messages is followed at once by the next: the queue probably holds more. */
+    @Test
+    void queueWithMessagesIsPolledAgainWithoutWaiting() throws Exception {
+        when(euclidEqs.receiveMessages(anyString(), anyLong(), anyLong()))
+                .thenReturn(ReceiveMessagesResponse.builder()
+                        .messages(List.of(message("{\"name\":\"abc\",\"value\":5}"))).build());
+        container.register(new TypedHandler(), TypedHandler.class.getMethod("handle", TestPayload.class),
+                "test-queue", 10, 0, true, 1);
+
+        container.start();
+
+        // Backing off here would allow only a handful in half a second.
+        verify(euclidEqs, timeout(500).atLeast(20)).receiveMessages(anyString(), anyLong(), anyLong());
+    }
+
+    /**
      * A euclid that is down refuses a poll at once, without holding it open, so a poller that
      * retried straight away would ask - and log an error - as fast as the refusals came back.
      */
