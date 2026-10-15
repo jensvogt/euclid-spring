@@ -101,11 +101,16 @@ public void onMessage(Message message) {
 }
 ```
 
-`waitTime` is spent inside `EuclidEqs#receiveMessages` waiting for an `eqs.message.sent` websocket
-event for this queue, so a message is normally handled as it arrives rather than on the next poll
-tick, and the client falls back to plain polling by itself if the gateway has no websocket support.
-Keep it above zero — a `waitTime` of zero makes `receiveMessages` return immediately, turning the
-listener's loop into a busy one.
+`waitTime` defaults to zero, which is short polling: every receive comes straight back, and the
+listener waits between polls of an empty queue itself, starting at 100 ms and doubling up to two
+seconds. A queue with messages is polled again at once. A message sent to an idle queue is therefore
+picked up within about two seconds.
+
+A `waitTime` above zero makes it a long poll, where EQS holds the receive open until a message
+arrives or the wait runs out. That picks up messages without delay, but every waiting receive
+occupies one of the EQS instance's worker threads for the whole wait. With enough listeners waiting,
+no thread is left for the sends that fill the queues, and those start to time out. Use it only where
+the latency matters.
 
 ## `@TopicListener`
 
@@ -220,9 +225,9 @@ euclid.listener.concurrency=4
 ```
 
 One is the default deliberately. A listener's threads are not a pool it borrows from — each is
-dedicated to that listener for the life of the application and holds a long poll open the whole
-time, so a higher default multiplies the requests parked against EQS by every listener in every
-application, busy or idle. One thread also keeps a queue's messages being handled in the order they
+dedicated to that listener for the life of the application and polls its queue the whole time, so
+a higher default multiplies the requests made against EQS by every listener in every application,
+busy or idle. One thread also keeps a queue's messages being handled in the order they
 arrived, which more than one cannot promise.
 
 Raise it when a handler blocks long enough that the queue grows while one thread works, and check
