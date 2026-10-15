@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.54](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.53...euclid-spring-boot-starter-v0.1.54) (2026-10-15)
+
+
+### Features
+
+* new EQS handling ([4381143](https://github.com/jensvogt/euclid-spring/commit/4381143d2bc89ebe9f1ddfd9574c996c45ef0720))
+
 ## [0.1.53](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.52...euclid-spring-boot-starter-v0.1.53) (2026-10-13)
 
 
