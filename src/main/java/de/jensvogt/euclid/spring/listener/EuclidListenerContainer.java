@@ -698,14 +698,33 @@ public class EuclidListenerContainer implements SmartLifecycle {
 
     private void touchHeartbeat(String queueErn) {
         try {
-            euclidSqsInternal.setQueueTag(queueErn, HEARTBEAT_TAG, Instant.now().toString());
+            // add-queue-tag, which creates the tag or overwrites it. This was set-queue-tag, which
+            // only changes a tag that already exists - and nothing ever created this one, so every
+            // heartbeat of every listener was refused with 404 and no queue ever carried one. The
+            // sweep then judged each queue by its creation date instead, and any per-run queue older
+            // than HEARTBEAT_STALE_SECONDS looked abandoned: a second instance of the listener, or
+            // the next start, deleted queues that were still being read.
+            euclidSqsInternal.addQueueTag(queueErn, HEARTBEAT_TAG, Instant.now().toString());
+            heartbeatFailed.remove(queueErn);
         } catch (Exception e) {
-            logger.debug("Could not refresh the heartbeat of queue " + queueErn, e);
+            // A warning the first time and a debug line after that. Debug alone is how the 404 above
+            // went unnoticed for as long as it did; a warning every minute would bury everything else.
+            if (heartbeatFailed.add(queueErn)) {
+                logger.warn("Could not refresh the heartbeat of queue " + queueErn
+                        + " - while it stays missing, another run's sweep may take the queue for abandoned", e);
+            } else {
+                logger.debug("Could not refresh the heartbeat of queue " + queueErn, e);
+            }
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
         }
     }
+
+    /**
+     * Queues whose last heartbeat failed, so a failure is reported once rather than every minute.
+     */
+    private final Set<String> heartbeatFailed = ConcurrentHashMap.newKeySet();
 
         /**
      * How often utilisation is reported, in seconds.

@@ -423,6 +423,25 @@ class EuclidListenerContainerTest {
         verify(euclidEqs, timeout(1000).atLeastOnce()).receiveMessages("delivery-ern", 10, 0);
     }
 
+    /**
+     * The heartbeat has to create its tag, not only change it. It used set-queue-tag, which EQS
+     * refuses for a tag the queue does not have yet - and nothing else ever created this one, so
+     * every beat of every listener was a 404 and no queue ever carried a heartbeat. The sweep then
+     * went by the queue's creation date, and took any per-run queue older than five minutes for
+     * abandoned, live or not.
+     */
+    @Test
+    void theHeartbeatCreatesItsTagRatherThanOnlyChangingIt() throws Exception {
+        when(euclidEqs.asInternal()).thenReturn(euclidEqs);
+        stubReceive(message(BUCKET_EVENT_BODY));
+        registerBucket(new EventHandler(), EventHandler.class.getMethod("handle", Event.class), "invoices", "reports/", false);
+
+        container.start();
+
+        verify(euclidEqs, timeout(1000)).addQueueTag(eq("delivery-ern"), eq("euclid.listener.heartbeat"), anyString());
+        verify(euclidEqs, never()).setQueueTag(anyString(), eq("euclid.listener.heartbeat"), anyString());
+    }
+
     @Test
     void mapsTheDeliveredMessageIntoAnEventEnvelope() throws Exception {
         stubReceive(message(BUCKET_EVENT_BODY));
