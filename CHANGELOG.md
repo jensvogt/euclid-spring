@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.56](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.55...euclid-spring-boot-starter-v0.1.56) (2026-10-15)
+
+
+### Features
+
+* EQS short polls default ([6949541](https://github.com/jensvogt/euclid-spring/commit/6949541c1f86519489a1597a1feb66320c45eb77))
+
 ## [0.1.55](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.54...euclid-spring-boot-starter-v0.1.55) (2026-10-15)
 
 
