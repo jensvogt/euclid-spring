@@ -298,7 +298,7 @@ class EuclidListenerContainerTest {
         when(euclidEqs.receiveMessages(anyString(), anyLong(), anyLong()))
                 .thenThrow(new EuclidServiceException("eqs", "receive-messages", 409, "Queue is stopped, ern: test-ern"))
                 .thenReturn(ReceiveMessagesResponse.builder()
-                        .messages(List.of(message("{\"name\":\"abc\",\"value\":5}"))).total(1).build());
+                        .messages(List.of(message("{\"name\":\"abc\",\"value\":5}"))).build());
         TypedHandler handler = new TypedHandler();
         container.register(handler, TypedHandler.class.getMethod("handle", TestPayload.class),
                 "test-queue", 10, 0, true, 1);
@@ -337,8 +337,8 @@ class EuclidListenerContainerTest {
                 .thenThrow(new IOException("Connection refused"))
                 .thenThrow(new IOException("Connection refused"))
                 .thenReturn(ReceiveMessagesResponse.builder()
-                        .messages(List.of(message("{\"name\":\"abc\",\"value\":5}"))).total(1).build())
-                .thenReturn(ReceiveMessagesResponse.builder().messages(Collections.emptyList()).total(0).build());
+                        .messages(List.of(message("{\"name\":\"abc\",\"value\":5}"))).build())
+                .thenReturn(ReceiveMessagesResponse.builder().messages(Collections.emptyList()).build());
         TypedHandler handler = new TypedHandler();
         container.register(handler, TypedHandler.class.getMethod("handle", TestPayload.class),
                 "test-queue", 10, 0, true, 1);
@@ -872,7 +872,7 @@ class EuclidListenerContainerTest {
      */
     private void startIdleListener() throws Exception {
         when(euclidEqs.receiveMessages(anyString(), anyLong(), anyLong()))
-                .thenReturn(ReceiveMessagesResponse.builder().messages(Collections.emptyList()).total(0).build());
+                .thenReturn(ReceiveMessagesResponse.builder().messages(Collections.emptyList()).build());
         container.register(new StringHandler(), StringHandler.class.getMethod("handle", String.class),
                            "test-queue", 10, 0, true, 1);
         container.start();
@@ -932,8 +932,8 @@ class EuclidListenerContainerTest {
 
     private void stubReceive(Message message) throws Exception {
         when(euclidEqs.receiveMessages(anyString(), anyLong(), anyLong()))
-                .thenReturn(ReceiveMessagesResponse.builder().messages(List.of(message)).total(1).build())
-                .thenReturn(ReceiveMessagesResponse.builder().messages(Collections.emptyList()).total(0).build());
+                .thenReturn(ReceiveMessagesResponse.builder().messages(List.of(message)).build())
+                .thenReturn(ReceiveMessagesResponse.builder().messages(Collections.emptyList()).build());
     }
 
     private Message message(String body) {
