@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.57](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.56...euclid-spring-boot-starter-v0.1.57) (2026-10-16)
+
+
+### Features
+
+* EAP rate limiter ([accfedb](https://github.com/jensvogt/euclid-spring/commit/accfedb80b46b3194a07c9d6e21f2413b0889de7))
+* EAP rate limiter ([e4d06c2](https://github.com/jensvogt/euclid-spring/commit/e4d06c27820b5efd5b8c9264edd3ffab1abae555))
+
 ## [0.1.56](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.55...euclid-spring-boot-starter-v0.1.56) (2026-10-15)
 
 
