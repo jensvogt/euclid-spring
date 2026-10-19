@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.58](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.57...euclid-spring-boot-starter-v0.1.58) (2026-10-19)
+
+
+### Features
+
+* new EQS long poll handling ([6ff14cf](https://github.com/jensvogt/euclid-spring/commit/6ff14cf00148654f4b02dc466f9078b1dd068e65))
+* new EQS long poll handling ([a60a684](https://github.com/jensvogt/euclid-spring/commit/a60a6843b15c816c8ff406c6f6c208f53fb43571))
+* new EQS long poll handling ([5955fd6](https://github.com/jensvogt/euclid-spring/commit/5955fd6b52127c2dc0a9be678a5a2ccfd2acb75a))
+
 ## [0.1.57](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.56...euclid-spring-boot-starter-v0.1.57) (2026-10-16)
 
 
