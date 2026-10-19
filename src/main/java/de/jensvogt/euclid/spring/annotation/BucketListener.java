@@ -99,7 +99,7 @@ public @interface BucketListener {
     long maxMessages() default 10;
 
     /**
-     * Seconds EQS holds a receive open waiting for a message, passed to
+     * Seconds EQS holds a reception open waiting for a message, passed to
      * {@code EuclidEqs#receiveMessages}.
      *
      * <p>Zero by default, which is short polling: each receive comes straight back, and the
