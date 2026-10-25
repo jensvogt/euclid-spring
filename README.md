@@ -230,6 +230,23 @@ a higher default multiplies the requests made against EQS by every listener in e
 busy or idle. One thread also keeps a queue's messages being handled in the order they
 arrived, which more than one cannot promise.
 
+### Stopping
+
+When the application shuts down - a redeploy, or euclid scaling the pool down - the container stops
+fetching at once, but lets a handler that is already running finish, for up to
+`euclid.listener.shutdown-grace` (15 seconds by default):
+
+```properties
+euclid.listener.shutdown-grace=15s
+```
+
+Only a handler that outlasts it is interrupted. Interrupting at once, as earlier versions did, cut
+off whatever the handler was in the middle of - a database transaction lost its connection while
+Spring closed the pool under it. Keep the value below what euclid's worker gives a process between
+SIGTERM and SIGKILL (`euclid.worker.stop-grace-seconds`, 20 by default), or the process is killed
+before the grace is up. A message whose handler did not get to start, or was interrupted, is not
+lost: it is deleted only after its handler returns, so it is delivered again once its lease expires.
+
 Raise it when a handler blocks long enough that the queue grows while one thread works, and check
 that `visibilityTimeout` still comfortably exceeds `maxMessages` × handler time — otherwise the tail
 of a batch loses its lease and is delivered again while it is still being handled.
