@@ -226,6 +226,27 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private final AtomicLong activeHandlers = new AtomicLong();
 
     /**
+     * The last count each polled queue gave, and the queues whose count is currently failing - see
+     * backlog().
+     */
+    private final Map<String, Long> lastCounts = new ConcurrentHashMap<>();
+    private final Set<String> uncountable = ConcurrentHashMap.newKeySet();
+
+    /**
+     * The threads polling a queue, and of those the ones running a handler right now. stop()
+     * interrupts the first kind and waits for the second - see there.
+     */
+    private final Set<Thread> pollers = ConcurrentHashMap.newKeySet();
+    private final Set<Thread> handling = ConcurrentHashMap.newKeySet();
+
+    /**
+     * How long stop() waits for handlers already running to finish before interrupting them. Just
+     * under what euclid's worker gives a process between SIGTERM and SIGKILL (20 s), so they finish
+     * rather than being killed. Set from {@code euclid.listener.shutdown-grace}.
+     */
+    private volatile Duration shutdownGrace = Duration.ofSeconds(15);
+
+    /**
      * Whether the last attempt to report load to EAP failed, so the first failure of a run can be
      * logged loudly and the ones after it quietly.
      */
@@ -299,6 +320,16 @@ public class EuclidListenerContainer implements SmartLifecycle {
      * nobody in and opens nothing. {@link #start()} resolves what the registered listeners
      * actually need, once the context is refreshed.
      */
+    /**
+     * How long {@link #stop()} lets handlers that are already running finish before interrupting
+     * them.
+     *
+     * @param shutdownGrace the grace; zero interrupts at once, as every version before this did
+     */
+    public void setShutdownGrace(Duration shutdownGrace) {
+        this.shutdownGrace = shutdownGrace == null || shutdownGrace.isNegative() ? Duration.ZERO : shutdownGrace;
+    }
+
     public EuclidListenerContainer(ObjectProvider<EuclidEqs> euclidSqsProvider,
                                    ObjectProvider<EuclidEsm> euclidEsmProvider,
                                    ObjectProvider<EuclidEns> euclidEnsProvider,
@@ -991,9 +1022,11 @@ public class EuclidListenerContainer implements SmartLifecycle {
     /**
      * How many messages are waiting across the queues this process polls.
      *
-     * <p>Best effort: a queue that cannot be counted contributes nothing rather than failing the
-     * whole report, since a backlog that is missing one queue is still far more useful than no
-     * backlog at all.
+     * <p>A queue that cannot be counted contributes the last count it gave, not zero. "Could not
+     * count" is not "empty": counted as zero, a queue holding 180 000 messages reported no backlog
+     * whenever EQS was slow enough for the count to time out, and the autoscaler took instances
+     * away from the one application that most needed them. A queue never counted yet contributes
+     * nothing, as before - there is nothing better to say about it.
      *
      * @return the total available message count
      */
@@ -1001,12 +1034,27 @@ public class EuclidListenerContainer implements SmartLifecycle {
         long total = 0;
         for (String ern : polledQueueErns) {
             try {
-                total += euclidSqsInternal.getMessageCount(ern).available();
+                long available = euclidSqsInternal.getMessageCount(ern).available();
+                lastCounts.put(ern, available);
+                if (uncountable.remove(ern)) {
+                    logger.info("Counting the messages of " + ern + " works again");
+                }
+                total += available;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return total;
             } catch (Exception e) {
+                Long last = lastCounts.get(ern);
+                // Said once, when it starts, rather than on every tick it goes on: the backlog this
+                // instance reports is then a figure that has stopped moving, which is worth knowing,
+                // and the reason is usually EQS being slow rather than anything here.
+                if (uncountable.add(ern)) {
+                    logger.warn("Could not count the messages of " + ern + ", reporting "
+                                + (last == null ? "no backlog for it" : "its last count, " + last)
+                                + " until it can be counted again: " + e.getMessage());
+                }
                 logger.debug("Could not count messages of " + ern, e);
+                if (last != null) total += last;
             }
         }
         return total;
@@ -1043,19 +1091,23 @@ public class EuclidListenerContainer implements SmartLifecycle {
             heartbeats = null;
         }
 
-        // The pollers are stopped before anything else is attempted, and by interrupting rather
-        // than by asking. Clearing "running" only takes effect when a poll returns, and a poll is
-        // deliberately parked for as long as its wait time - twenty seconds by default - so a
-        // container that merely stops re-issuing them still takes that long to go quiet. Whoever
-        // is shutting this process down is rarely willing to wait: euclid sends SIGKILL five
-        // seconds after SIGTERM, so a container that waits out one long poll is killed rather than
-        // stopped.
+        // Pollers that are waiting are interrupted at once: clearing "running" only takes effect
+        // when a poll returns, and a poll is parked for as long as its wait time - twenty seconds
+        // by default - so a container that merely stopped re-issuing them would take that long to
+        // go quiet.
         //
-        // A handler running at this moment is interrupted too, which is the price. It costs
-        // nothing that is not already handled: a message is deleted only after its handler
-        // returns, so one abandoned here keeps its lease, becomes visible again when the lease
-        // expires, and is delivered to whoever is running next.
+        // Handlers that are running are not. Interrupting one used to be the price of a quick stop,
+        // and it was paid in the middle of whatever the handler was doing: a Postgres transaction
+        // lost its connection, Spring closed the pool under it, and every scale-down filled the log
+        // with errors. The message was never lost - it is deleted only after its handler returns -
+        // but the work was done twice. So they are given shutdownGrace to finish, which euclid's
+        // worker leaves room for before it sends SIGKILL; only what outlasts it is interrupted.
+        for (Thread poller : pollers) {
+            if (!handling.contains(poller)) poller.interrupt();
+        }
         if (executor != null) {
+            executor.shutdown();
+            awaitHandlers(shutdownGrace);
             executor.shutdownNow();
         }
 
@@ -1076,6 +1128,25 @@ public class EuclidListenerContainer implements SmartLifecycle {
             }
         }
         logger.info("Listener container stopped in " + (System.nanoTime() - startedAt) / 1_000_000 + "ms");
+    }
+
+    /**
+     * Waits until no handler is running, or the grace has passed.
+     */
+    private void awaitHandlers(Duration grace) {
+        final long deadline = System.nanoTime() + grace.toNanos();
+        while (!handling.isEmpty() && System.nanoTime() < deadline) {
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        if (!handling.isEmpty()) {
+            logger.warn(handling.size() + " handler(s) still running " + grace.toMillis()
+                        + "ms after stop was asked, interrupting them");
+        }
     }
 
     /**
@@ -1422,6 +1493,15 @@ public class EuclidListenerContainer implements SmartLifecycle {
         // this is the only place that knows which listener the thread about to block belongs to -
         // which is exactly what a thread dump is being read for.
         Thread.currentThread().setName("euclid-" + registration.name() + "-" + index);
+        pollers.add(Thread.currentThread());
+        try {
+            pollQueue(registration, ern);
+        } finally {
+            pollers.remove(Thread.currentThread());
+        }
+    }
+
+    private void pollQueue(MessageRegistration registration, String ern) {
         polledQueueErns.add(ern);
         boolean stopped = false;
         int failures = 0;
@@ -1443,7 +1523,17 @@ public class EuclidListenerContainer implements SmartLifecycle {
                     failureDelayMillis = POLL_RETRY_INITIAL.toMillis();
                 }
                 for (Message message : messages) {
-                    dispatch(registration, message);
+                    // Marked as handling before "running" is read again, so stop() - which clears
+                    // "running" first and then interrupts whoever is not handling - either leaves
+                    // this thread alone and it stops here, or interrupts it and it stops here. A
+                    // message not started keeps its lease and goes to whoever runs next.
+                    handling.add(Thread.currentThread());
+                    try {
+                        if (!running.get()) break;
+                        dispatch(registration, message);
+                    } finally {
+                        handling.remove(Thread.currentThread());
+                    }
                 }
                 // A long poll has already waited on the server, so only a short one backs off here.
                 // A queue with messages is asked again at once: it is likely to hold more.

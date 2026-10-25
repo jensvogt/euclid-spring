@@ -276,9 +276,14 @@ public class EuclidSqsAutoConfiguration {
                                                              ObjectProvider<EuclidEns> euclidEnsProvider,
                                                            ObjectProvider<EuclidEmo> euclidEmoProvider,
                                                            ObjectProvider<EuclidEap> euclidEapProvider,
-                                                             ObjectProvider<JsonMapper> objectMapperProvider) {
-        return new EuclidListenerContainer(euclidSqsProvider, euclidEsmProvider, euclidEnsProvider, euclidEmoProvider,
-                                           euclidEapProvider, objectMapperProvider);
+                                                             ObjectProvider<JsonMapper> objectMapperProvider,
+                                                             org.springframework.core.env.Environment environment) {
+        EuclidListenerContainer container = new EuclidListenerContainer(euclidSqsProvider, euclidEsmProvider, euclidEnsProvider,
+                                                                        euclidEmoProvider, euclidEapProvider, objectMapperProvider);
+        // How long a stop lets running handlers finish - see EuclidListenerContainer.stop().
+        container.setShutdownGrace(environment.getProperty("euclid.listener.shutdown-grace", java.time.Duration.class,
+                                                           java.time.Duration.ofSeconds(15)));
+        return container;
     }
 
     // A bean post processor is instantiated ahead of the ordinary singletons, so a @Bean method

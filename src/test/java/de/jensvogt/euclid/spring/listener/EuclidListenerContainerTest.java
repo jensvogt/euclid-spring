@@ -14,6 +14,7 @@ import de.jensvogt.euclid.dto.eqs.model.Queue;
 import de.jensvogt.euclid.dto.esm.GetBucketErnResponse;
 import de.jensvogt.euclid.dto.esm.SubscribeResponse;
 import de.jensvogt.euclid.dto.eqs.GetQueueErnResponse;
+import de.jensvogt.euclid.dto.eqs.GetMessageCountResponse;
 import de.jensvogt.euclid.dto.eqs.ReceiveMessagesResponse;
 import de.jensvogt.euclid.dto.eqs.model.Message;
 import de.jensvogt.euclid.exception.EuclidServiceException;
@@ -165,6 +166,79 @@ class EuclidListenerContainerTest {
                 .receiveMessages(anyString(), anyLong(), anyLong()));
         await().pollDelay(Duration.ofMillis(200)).atMost(Duration.ofSeconds(2))
                 .untilAsserted(() -> assertEquals(0L, container.activeHandlers()));
+    }
+
+    /**
+     * A handler in the middle of its work when the container is stopped finishes it. Interrupting
+     * it cut off what it was doing - a Postgres transaction lost its connection on every
+     * scale-down - so stop() waits for it, within the grace, and only then goes on.
+     */
+    @Test
+    void stopLetsARunningHandlerFinish() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        stubReceive(message("{\"name\":\"abc\",\"value\":5}"));
+        RecordingHandler handler = new RecordingHandler(entered, release);
+        container.register(handler, RecordingHandler.class.getMethod("handle", TestPayload.class),
+                "test-queue", 10, 0, true, 1);
+        container.start();
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+
+        Thread stopper = Thread.ofVirtual().start(container::stop);
+        Thread.sleep(300);
+        assertTrue(stopper.isAlive(), "stop() returned while a handler was still running");
+        release.countDown();
+        stopper.join(5000);
+
+        assertFalse(stopper.isAlive());
+        assertTrue(handler.finished, "the handler did not get to finish");
+        assertFalse(handler.interrupted, "the handler was interrupted");
+        // Finished, so its message is done with too, not left to be delivered again.
+        verify(euclidEqs, atLeastOnce()).deleteMessage(anyString());
+    }
+
+    /** But not for ever: a handler that outlasts the grace is interrupted, so a stop always ends. */
+    @Test
+    void aHandlerThatOutlastsTheGraceIsInterrupted() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        stubReceive(message("{\"name\":\"abc\",\"value\":5}"));
+        RecordingHandler handler = new RecordingHandler(entered, new CountDownLatch(1));
+        container.register(handler, RecordingHandler.class.getMethod("handle", TestPayload.class),
+                "test-queue", 10, 0, true, 1);
+        container.setShutdownGrace(Duration.ofMillis(200));
+        container.start();
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+
+        long started = System.nanoTime();
+        container.stop();
+        long tookMillis = (System.nanoTime() - started) / 1_000_000;
+
+        assertTrue(tookMillis < 4000, "stop() took " + tookMillis + "ms");
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertTrue(handler.interrupted));
+    }
+
+    /** Records whether it got to finish, and whether it was interrupted on the way. */
+    private static class RecordingHandler {
+
+        private final CountDownLatch entered;
+        private final CountDownLatch release;
+        private volatile boolean finished;
+        private volatile boolean interrupted;
+
+        private RecordingHandler(CountDownLatch entered, CountDownLatch release) {
+            this.entered = entered;
+            this.release = release;
+        }
+
+        public void handle(TestPayload payload) {
+            entered.countDown();
+            try {
+                if (release.await(10, TimeUnit.SECONDS)) finished = true;
+            } catch (InterruptedException e) {
+                interrupted = true;
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     /** A handler that waits to be let go, so the count can be read while one is in flight. */
@@ -843,6 +917,36 @@ class EuclidListenerContainerTest {
         verify(euclidEap).reportLoad(eq("instance-1"), anyDouble(), anyLong(), anyLong(), eq("file-copy"));
     }
 
+    /**
+     * A count that fails is "unknown", not "empty". Counted as zero, a queue holding 180 000
+     * messages reported no backlog whenever EQS was too slow to answer the count, and the autoscaler
+     * took instances away from the application that most needed them.
+     */
+    @Test
+    void aQueueThatCannotBeCountedReportsItsLastCountNotZero() throws Exception {
+        stubReceive(message("{\"name\":\"abc\",\"value\":5}"));
+        when(euclidEqs.asInternal()).thenReturn(euclidEqs);
+        TypedHandler handler = new TypedHandler();
+        container.register(handler, TypedHandler.class.getMethod("handle", TestPayload.class),
+                "test-queue", 10, 0, true, 1);
+        container.start();
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> verify(euclidEqs, atLeastOnce())
+                .receiveMessages(anyString(), anyLong(), anyLong()));
+
+        when(euclidEqs.getMessageCount(anyString()))
+                .thenReturn(new GetMessageCountResponse("ern", 180_000, 0, 0, 180_000))
+                .thenThrow(new java.io.IOException("request timed out"));
+
+        // The backlog is counted every fourth tick: the first counts, the fifth fails to.
+        for (int tick = 0; tick < 5; tick++) {
+            container.reportOnce(euclidEap, null, "instance-1", "protocolizing", 1);
+        }
+
+        org.mockito.ArgumentCaptor<Long> backlog = org.mockito.ArgumentCaptor.forClass(Long.class);
+        verify(euclidEap, atLeast(5)).reportLoad(anyString(), anyDouble(), backlog.capture(), anyLong(), anyString());
+        assertEquals(180_000L, backlog.getAllValues().getLast(), "a failed count was reported as an empty queue");
+    }
+
     /** And the other way about, since neither is allowed to cost the other. */
     @Test
     void aLoadReportThatFailsDoesNotCostTheMetricsPush() throws Exception {
@@ -909,6 +1013,10 @@ class EuclidListenerContainerTest {
         EuclidEmo refusing = mock(EuclidEmo.class);
         doThrow(new EuclidServiceException("emo", "push-metrics", 403, "refused"))
                 .when(refusing).pushMetrics(anyString(), anyList());
+        // Counting works here: this is about the refused push, and a count that failed would be a
+        // warning of its own - see aQueueThatCannotBeCountedReportsItsLastCountNotZero.
+        when(euclidEqs.asInternal()).thenReturn(euclidEqs);
+        when(euclidEqs.getMessageCount(anyString())).thenReturn(new GetMessageCountResponse("ern", 0, 0, 0, 0));
         startIdleListener();
 
         for (int tick = 0; tick < 5; tick++) {
