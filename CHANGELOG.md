@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.59](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.58...euclid-spring-boot-starter-v0.1.59) (2026-10-25)
+
+
+### Features
+
+* new ESM/EAP methods ([8ac1dc9](https://github.com/jensvogt/euclid-spring/commit/8ac1dc9d3d8024f2d1cff4a8c96200025535a732))
+
 ## [0.1.58](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.57...euclid-spring-boot-starter-v0.1.58) (2026-10-19)
 
 
