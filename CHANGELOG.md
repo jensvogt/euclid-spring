@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.60](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.59...euclid-spring-boot-starter-v0.1.60) (2026-11-06)
+
+
+### Features
+
+* new ESM bucket listener, add ESM versioning ([2c51f18](https://github.com/jensvogt/euclid-spring/commit/2c51f1810fe5760319d0231f2128554d93b9a456))
+* new ESM bucket listener, add ESM versioning ([e70d418](https://github.com/jensvogt/euclid-spring/commit/e70d41880f9ff1ebbb21b59314f25f5bad7d894b))
+
 ## [0.1.59](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.58...euclid-spring-boot-starter-v0.1.59) (2026-10-25)
 
 
