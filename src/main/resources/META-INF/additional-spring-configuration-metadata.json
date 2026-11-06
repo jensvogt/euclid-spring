@@ -5,6 +5,11 @@
       "type": "java.lang.Integer",
       "description": "How many threads a listener that does not set its own concurrency runs. Each is dedicated to one listener for the life of the application and holds a long poll open the whole time, so this multiplies the requests parked against EQS by every listener. More than one also gives up handling a queue's messages in the order they arrived.",
       "defaultValue": 10
+    },
+    {
+      "name": "euclid.listener.max-retries",
+      "type": "java.lang.Integer",
+      "description": "How many times a @TopicListener or @BucketListener delivery queue hands out a message before moving it to the listener's dead letter queue (<queue>-dlqueue), for every listener that does not set its own maxRetries. 1 to 1000. Unset, new queues get 3 and existing ones keep the limit they have; set, it is applied to existing queues on every start."
     }
   ]
 }

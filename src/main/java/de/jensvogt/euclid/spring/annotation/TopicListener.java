@@ -82,4 +82,16 @@ public @interface TopicListener {
      * one unless it says otherwise.
      */
     int concurrency() default 0;
+
+    /**
+     * How many times a message is delivered to this listener before EQS gives up on it and moves it
+     * to the listener's dead letter queue ({@code <queue>-dlqueue}) - the delivery queue's
+     * {@code maxReceiveCount}, between 1 and 1000.
+     *
+     * <p>Left at zero, the application-wide {@code euclid.listener.max-retries} decides; when that
+     * is unset too, a queue the listener creates gets 3 and an existing one keeps whatever it has,
+     * so a limit somebody set on it by hand is not undone by a restart. Set here or there, it is
+     * applied to the delivery queue on every start, whether the listener created it or found it.
+     */
+    int maxRetries() default 0;
 }

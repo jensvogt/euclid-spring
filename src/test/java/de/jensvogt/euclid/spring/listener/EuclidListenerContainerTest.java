@@ -752,6 +752,50 @@ class EuclidListenerContainerTest {
     }
 
     @Test
+    void aConfiguredMaxRetriesIsAppliedToAnExistingSharedQueue() throws Exception {
+        stubReceive(message(BUCKET_EVENT_BODY));
+        container.registerBucket(new EventHandler(), EventHandler.class.getMethod("handle", Event.class),
+                "invoice-import", "invoices", "", false, OBJECT_EVENTS, 10, 0, 300, true, 1, true, 7);
+
+        container.start();
+
+        verify(euclidEqs, timeout(1000)).createQueue(eq("invoice-import"), anyLong(), eq(7L), anyLong(),
+                anyString(), anyLong(), anyString(), anyBoolean());
+        // createQueue hands back an existing queue unchanged, so the limit has to be set as well.
+        verify(euclidEqs, timeout(1000)).setQueueMaxRetries("delivery-ern", 7);
+    }
+
+    @Test
+    void anUnconfiguredMaxRetriesLeavesAnExistingQueueAlone() throws Exception {
+        stubReceive(message(BUCKET_EVENT_BODY));
+        registerBucket(new EventHandler(), EventHandler.class.getMethod("handle", Event.class), "invoices", "", false,
+                true);
+
+        container.start();
+
+        verify(euclidEqs, timeout(1000)).createQueue(eq("invoice-import"), anyLong(), eq(3L), anyLong(),
+                anyString(), anyLong(), anyString(), anyBoolean());
+        verify(euclidEqs, timeout(1000).atLeastOnce()).receiveMessages(anyString(), anyLong(), anyLong());
+        verify(euclidEqs, never()).setQueueMaxRetries(anyString(), anyLong());
+    }
+
+    @Test
+    void aFailedMaxRetriesUpdateDoesNotStopTheListener() throws Exception {
+        when(euclidEqs.setQueueMaxRetries(anyString(), anyLong()))
+                .thenThrow(new EuclidServiceException("eqs", "set-queue-max-retries", 400, "unknown action"));
+        stubReceive(message("published-body"));
+        StringHandler handler = new StringHandler();
+        container.registerTopic(handler, StringHandler.class.getMethod("handle", String.class),
+                "order-events", "orders-app", 10, 0, true, 1, 5);
+
+        container.start();
+
+        await().atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertEquals("published-body", handler.received));
+        verify(euclidEqs).setQueueMaxRetries("test-ern", 5);
+    }
+
+    @Test
     void topicListenerReceivesFromTheQueueAlreadySubscribedToTheTopic() throws Exception {
         stubReceive(message("published-body"));
         StringHandler handler = new StringHandler();

@@ -205,6 +205,23 @@ public void onObject(Event event) {
 A handler that throws leaves its event in the queue, to be delivered again once the
 `visibilityTimeout` expires.
 
+### Retries and the dead letter queue
+
+A message that keeps failing is not redelivered forever: after `maxRetries` deliveries EQS moves it
+to the listener's dead letter queue, `<queue>-dlqueue`. `@TopicListener` and `@BucketListener` take
+`maxRetries` (1 to 1000), and `euclid.listener.max-retries` sets it for every listener that does not
+set its own:
+
+```properties
+euclid.listener.max-retries=5
+```
+
+Left unset in both places, a queue the listener creates allows 3 deliveries, and a queue that
+already exists keeps whatever limit it has — so a limit set by hand (EQS `set-queue-max-retries`)
+is not undone by the next restart. Once set, it is applied
+on every start to a queue that already exists, too: a topic listener's queue, or a shared bucket
+listener's. A server too old to change the limit leaves it as it was, with a warning in the log.
+
 ## Threading
 
 Each listener runs `concurrency` polling threads of its own, started when the context is refreshed
