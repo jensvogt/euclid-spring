@@ -43,7 +43,9 @@ public class TopicListenerBeanPostProcessor implements BeanPostProcessor, Embedd
             String topic = resolve(annotation.value());
             container.getObject().registerTopic(bean, method, topic, queue(annotation, topic, method),
                     annotation.maxMessages(), annotation.waitTime(), annotation.autoDelete(),
-                    ListenerDefaults.concurrency(annotation.concurrency(), embeddedValueResolver));
+                    ListenerDefaults.concurrency(annotation.concurrency(), embeddedValueResolver),
+                    ListenerDefaults.maxRetries(annotation.maxRetries(), embeddedValueResolver,
+                            "@TopicListener " + method.getDeclaringClass().getSimpleName() + "." + method.getName()));
         }, method -> method.getAnnotation(TopicListener.class) != null);
         return bean;
     }

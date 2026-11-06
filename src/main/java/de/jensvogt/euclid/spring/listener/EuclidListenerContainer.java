@@ -315,12 +315,6 @@ public class EuclidListenerContainer implements SmartLifecycle {
     private final String runId = UUID.randomUUID().toString().substring(0, 8);
 
     /**
-     * Takes every client as a provider and resolves none of them here, so that constructing the
-     * container - which the bean post processors do while the context is still starting up - logs
-     * nobody in and opens nothing. {@link #start()} resolves what the registered listeners
-     * actually need, once the context is refreshed.
-     */
-    /**
      * How long {@link #stop()} lets handlers that are already running finish before interrupting
      * them.
      *
@@ -344,6 +338,12 @@ public class EuclidListenerContainer implements SmartLifecycle {
         this.objectMapperProvider = objectMapperProvider;
     }
 
+    /**
+     * Takes every client as a provider and resolves none of them here, so that constructing the
+     * container - which the bean post processors do while the context is still starting up - logs
+     * nobody in and opens nothing. {@link #start()} resolves what the registered listeners
+     * actually need, once the context is refreshed.
+     */
     public void register(Object bean, Method method, String queueName, long maxMessages, long waitTime,
                           boolean autoDelete, int concurrency) {
         method.setAccessible(true);
@@ -357,9 +357,21 @@ public class EuclidListenerContainer implements SmartLifecycle {
      */
     public void registerTopic(Object bean, Method method, String topicName, String queueName, long maxMessages,
                               long waitTime, boolean autoDelete, int concurrency) {
+        registerTopic(bean, method, topicName, queueName, maxMessages, waitTime, autoDelete, concurrency, 0);
+    }
+
+    /**
+     * As {@link #registerTopic(Object, Method, String, String, long, long, boolean, int)}, with the
+     * delivery queue's {@code maxReceiveCount}.
+     *
+     * @param maxRetries deliveries before a message is dead-lettered, 1 to 1000; zero leaves an
+     *                   existing queue's limit alone and gives a new one the default of 3
+     */
+    public void registerTopic(Object bean, Method method, String topicName, String queueName, long maxMessages,
+                              long waitTime, boolean autoDelete, int concurrency, int maxRetries) {
         method.setAccessible(true);
         topicRegistrations.add(new TopicRegistration(bean, method, topicName, queueName, maxMessages, waitTime,
-                autoDelete, concurrency));
+                autoDelete, concurrency, maxRetries));
     }
 
     /**
@@ -369,9 +381,24 @@ public class EuclidListenerContainer implements SmartLifecycle {
     public void registerBucket(Object bean, Method method, String queueName, String bucketName, String prefix,
                                boolean directories, List<String> eventTypes, long maxMessages, long waitTime,
                                long visibilityTimeout, boolean autoDelete, int concurrency, boolean shared) {
+        registerBucket(bean, method, queueName, bucketName, prefix, directories, eventTypes, maxMessages, waitTime,
+                visibilityTimeout, autoDelete, concurrency, shared, 0);
+    }
+
+    /**
+     * As {@link #registerBucket(Object, Method, String, String, String, boolean, List, long, long, long,
+     * boolean, int, boolean)}, with the delivery queue's {@code maxReceiveCount}.
+     *
+     * @param maxRetries deliveries before an event is dead-lettered, 1 to 1000; zero leaves an
+     *                   existing shared queue's limit alone and gives a new queue the default of 3
+     */
+    public void registerBucket(Object bean, Method method, String queueName, String bucketName, String prefix,
+                               boolean directories, List<String> eventTypes, long maxMessages, long waitTime,
+                               long visibilityTimeout, boolean autoDelete, int concurrency, boolean shared,
+                               int maxRetries) {
         method.setAccessible(true);
         bucketRegistrations.add(new BucketRegistration(bean, method, queueName, bucketName, prefix, directories,
-                eventTypes, maxMessages, waitTime, visibilityTimeout, autoDelete, concurrency, shared));
+                eventTypes, maxMessages, waitTime, visibilityTimeout, autoDelete, concurrency, shared, maxRetries));
     }
 
     /**
@@ -541,10 +568,12 @@ public class EuclidListenerContainer implements SmartLifecycle {
 
         // The visibility timeout is the queue's, not the message's: it is what gives a handler
         // that dies mid-work its event back rather than losing it. The dead letter queue is where
-        // it stops getting it back: after DEFAULT_MAX_RETRIES deliveries the message is moved
-        // there instead of being handed to the handler that has already failed on it.
-        String queueErn = euclidSqs.createQueue(queueName, registration.visibilityTimeout(), DEFAULT_MAX_RETRIES,
-                DEFAULT_MAX_MESSAGE_LENGTH, registration.queueName() + DLQ_SUFFIX, 0, DEFAULT_PRIORITY, true).ern();
+        // it stops getting it back: after maxRetries deliveries the message is moved there instead
+        // of being handed to the handler that has already failed on it. A fresh queue per run, so
+        // the limit it is created with is the limit it has - nothing to apply afterwards.
+        String queueErn = euclidSqs.createQueue(queueName, registration.visibilityTimeout(),
+                createdMaxRetries(registration.maxRetries()), DEFAULT_MAX_MESSAGE_LENGTH,
+                registration.queueName() + DLQ_SUFFIX, 0, DEFAULT_PRIORITY, true).ern();
         touchHeartbeat(queueErn);
 
         String subscriptionErn = euclidEsm.subscribe(bucketErn, "SQS", queueErn, registration.eventTypes(),
@@ -579,8 +608,12 @@ public class EuclidListenerContainer implements SmartLifecycle {
 
         String queueName = registration.queueName();
 
-        String queueErn = euclidSqs.createQueue(queueName, registration.visibilityTimeout(), DEFAULT_MAX_RETRIES,
-                DEFAULT_MAX_MESSAGE_LENGTH, queueName + DLQ_SUFFIX, 0, DEFAULT_PRIORITY, true).ern();
+        String queueErn = euclidSqs.createQueue(queueName, registration.visibilityTimeout(),
+                createdMaxRetries(registration.maxRetries()), DEFAULT_MAX_MESSAGE_LENGTH, queueName + DLQ_SUFFIX, 0,
+                DEFAULT_PRIORITY, true).ern();
+        // createQueue on a name that exists returns that queue as it is, so a limit changed since
+        // the queue was first made would otherwise never reach it.
+        applyMaxRetries(registration, queueName, queueErn);
 
         euclidEsm.subscribe(bucketErn, "SQS", queueErn, registration.eventTypes(),
                 registration.prefix(), registration.directories());
@@ -1263,7 +1296,8 @@ public class EuclidListenerContainer implements SmartLifecycle {
      */
     private String subscribedQueueErn(TopicRegistration registration) throws Exception {
         String topicErn = euclidEns.getTopicErn(registration.topicName()).ern();
-        String queueErn = queueErn(registration.queueName());
+        String queueErn = queueErn(registration.queueName(), registration.maxRetries());
+        applyMaxRetries(registration, registration.queueName(), queueErn);
 
         List<Subscription> subscriptions = euclidEns.listSubscriptions(topicErn).subscriptions();
         boolean subscribed = subscriptions != null && subscriptions.stream()
@@ -1428,7 +1462,8 @@ public class EuclidListenerContainer implements SmartLifecycle {
     }
 
     private record TopicRegistration(Object bean, Method method, String topicName, String queueName, long maxMessages,
-                                     long waitTime, boolean autoDelete, int concurrency) implements MessageRegistration {
+                                     long waitTime, boolean autoDelete, int concurrency, int maxRetries)
+            implements MessageRegistration {
 
         @Override
         public String name() {
@@ -1443,7 +1478,8 @@ public class EuclidListenerContainer implements SmartLifecycle {
 
     private record BucketRegistration(Object bean, Method method, String queueName, String bucketName, String prefix,
                                       boolean directories, List<String> eventTypes, long maxMessages, long waitTime,
-                                      long visibilityTimeout, boolean autoDelete, int concurrency, boolean shared)
+                                      long visibilityTimeout, boolean autoDelete, int concurrency, boolean shared,
+                                      int maxRetries)
             implements MessageRegistration {
 
         @Override
@@ -1473,7 +1509,7 @@ public class EuclidListenerContainer implements SmartLifecycle {
      * hides it from listings and nothing else - this method finds it again by name on the next
      * start, which is what makes the queue outlive one run.
      */
-    private String queueErn(String queueName) throws Exception {
+    private String queueErn(String queueName, int maxRetries) throws Exception {
         try {
             String ern = euclidSqs.getQueueErn(queueName).ern();
             if (StringUtils.hasText(ern)) {
@@ -1484,8 +1520,46 @@ public class EuclidListenerContainer implements SmartLifecycle {
         }
         // The defaults of createQueue(name), spelled out because saying "internal" means saying
         // all of them.
-        return euclidSqs.createQueue(queueName, DEFAULT_VISIBILITY_SECONDS, DEFAULT_MAX_RETRIES,
+        return euclidSqs.createQueue(queueName, DEFAULT_VISIBILITY_SECONDS, createdMaxRetries(maxRetries),
                 DEFAULT_MAX_MESSAGE_LENGTH, queueName + DLQ_SUFFIX, 0, DEFAULT_PRIORITY, true).ern();
+    }
+
+    /**
+     * The {@code maxReceiveCount} a queue is created with: the configured one, or the default when
+     * none was configured.
+     */
+    private static long createdMaxRetries(int maxRetries) {
+        return maxRetries > 0 ? maxRetries : DEFAULT_MAX_RETRIES;
+    }
+
+    /**
+     * Sets a queue that may already have existed to the configured {@code maxReceiveCount}.
+     *
+     * <p>Only when one was configured. Without that, an existing queue keeps the limit it has -
+     * which may be one an operator set by hand, and a restart is no reason to undo it.
+     *
+     * <p>A failure is logged and the listener carries on: the queue still delivers, with the limit
+     * it had, and a server from before {@code set-queue-max-retries} existed refuses the call
+     * however often it is asked. Stopping the listener over it would trade a retry count for every
+     * message the listener would otherwise have handled.
+     */
+    private void applyMaxRetries(MessageRegistration registration, String queueName, String queueErn) {
+        int maxRetries = registration instanceof TopicRegistration topic ? topic.maxRetries()
+                : registration instanceof BucketRegistration bucket ? bucket.maxRetries() : 0;
+        if (maxRetries <= 0) {
+            return;
+        }
+        try {
+            euclidSqs.setQueueMaxRetries(queueErn, maxRetries);
+            logger.debug("Queue '" + queueName + "' of " + registration.describe() + " allows " + maxRetries
+                    + " deliveries before dead-lettering");
+        } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            logger.warn("Could not set maxRetries of queue '" + queueName + "' of " + registration.describe()
+                    + " to " + maxRetries + "; it keeps the limit it had", e);
+        }
     }
 
     private void pollMessages(MessageRegistration registration, String ern, int index) {

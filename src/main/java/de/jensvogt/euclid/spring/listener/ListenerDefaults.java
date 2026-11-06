@@ -25,7 +25,56 @@ final class ListenerDefaults {
     private static final String CONCURRENCY_PROPERTY = "${euclid.listener.concurrency:"
             + DEFAULT_CONCURRENCY + "}";
 
+    /** The bounds EQS holds a queue's {@code maxReceiveCount} to. */
+    static final int MIN_MAX_RETRIES = 1;
+    static final int MAX_MAX_RETRIES = 1000;
+
+    private static final String MAX_RETRIES_PROPERTY = "${euclid.listener.max-retries:0}";
+
     private ListenerDefaults() {
+    }
+
+    /**
+     * The delivery attempts a listener's queue should allow before dead-lettering, taking the
+     * annotation's own value when it names one and {@code euclid.listener.max-retries} when it
+     * does not.
+     *
+     * <p>Zero means neither said anything, and is kept as zero rather than turned into a default
+     * here: the container only changes an existing queue's limit when somebody asked for a limit,
+     * and it can only tell that from zero.
+     *
+     * <p>An annotation outside EQS's bounds is refused at startup - it is written in code, and a
+     * value the server will refuse is a mistake better found by whoever wrote it than in a warning
+     * at runtime. The property is treated like {@code euclid.listener.concurrency}: a value that is
+     * not a number, or out of bounds, counts as unset.
+     *
+     * @param annotated the annotation's {@code maxRetries}, zero meaning "not said"
+     * @param resolver  resolves the property placeholder, or {@code null} outside a context
+     * @param listener  how the listener is named in the error for an out-of-bounds annotation
+     * @return a limit between 1 and 1000, or zero when none was configured
+     */
+    static int maxRetries(int annotated, StringValueResolver resolver, String listener) {
+        if (annotated != 0) {
+            if (annotated < MIN_MAX_RETRIES || annotated > MAX_MAX_RETRIES) {
+                throw new IllegalStateException("maxRetries of " + listener + " is " + annotated
+                        + "; EQS accepts " + MIN_MAX_RETRIES + " to " + MAX_MAX_RETRIES
+                        + ", or leave it at 0 for euclid.listener.max-retries");
+            }
+            return annotated;
+        }
+        if (resolver == null) {
+            return 0;
+        }
+        String value = resolver.resolveStringValue(MAX_RETRIES_PROPERTY);
+        if (!StringUtils.hasText(value)) {
+            return 0;
+        }
+        try {
+            int configured = Integer.parseInt(value.trim());
+            return configured >= MIN_MAX_RETRIES && configured <= MAX_MAX_RETRIES ? configured : 0;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     /**

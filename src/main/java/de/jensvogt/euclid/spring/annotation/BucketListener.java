@@ -135,4 +135,16 @@ public @interface BucketListener {
      * one unless it says otherwise.
      */
     int concurrency() default 0;
+
+    /**
+     * How many times an event is delivered to this listener before EQS gives up on it and moves it
+     * to the listener's dead letter queue ({@code <queue>-dlqueue}) - the delivery queue's
+     * {@code maxReceiveCount}, between 1 and 1000.
+     *
+     * <p>Left at zero, the application-wide {@code euclid.listener.max-retries} decides; when that
+     * is unset too, a new queue gets 3 and an existing {@link #shared()} queue keeps whatever it
+     * has, so a limit somebody set on it by hand is not undone by a restart. Set here or there, it
+     * is applied to an existing shared queue on every start.
+     */
+    int maxRetries() default 0;
 }
