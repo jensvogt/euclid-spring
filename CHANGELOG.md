@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.61](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.60...euclid-spring-boot-starter-v0.1.61) (2026-11-22)
+
+
+### Features
+
+* added EDS module ([b77dd11](https://github.com/jensvogt/euclid-spring/commit/b77dd1184173ce2f8fcae511fbae9c85543cb3fb))
+
 ## [0.1.60](https://github.com/jensvogt/euclid-spring/compare/euclid-spring-boot-starter-v0.1.59...euclid-spring-boot-starter-v0.1.60) (2026-11-06)
 
 
