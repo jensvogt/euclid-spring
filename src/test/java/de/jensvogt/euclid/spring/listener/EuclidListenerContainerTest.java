@@ -1162,7 +1162,7 @@ class EuclidListenerContainerTest {
      */
     private Queue queue(String name, String ern, Instant heartbeat) {
         return new Queue(name, "owner", ern, Map.of("euclid.listener.heartbeat", heartbeat.toString()), 0, 0, 0, 0, 0,
-                30, 1024, 3, "", "MEDIUM", Instant.now().toString(), Instant.now().toString());
+                30, 1024, 3, "", "MEDIUM", "AVAILABLE", true, Instant.now().toString(), Instant.now().toString());
     }
 
     private record TestPayload(String name, int value) {
